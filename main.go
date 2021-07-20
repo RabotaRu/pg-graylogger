@@ -12,16 +12,14 @@ import (
 	"strconv"
 	"strings"
 	"time"
-)
 
-import (
 	// csv "github.com/JensRantil/go-csv" // Alternative pythonistic but revers-compatible implementaion
 	"gopkg.in/Graylog2/go-gelf.v2/gelf"
 	"k8s.io/utils/inotify"
 )
 
 const (
-	Version       = "v0.1"
+	Version       = "v0.1.0"
 	bufSize       = 1048576
 	logTimeFormat = "2006-01-02 15:04:05.000 MST"
 	shortMsgLen   = 100
@@ -29,12 +27,10 @@ const (
 )
 
 var (
-	Debug          bool
-	showVer        bool
-	logDir         string
-	graylogAddress string
-	depersonalize  bool
-	pgCsvLogFields = [...]string{
+	Debug, showVer, depersonalize bool
+	logDir                        string
+	graylogAddress                string
+	pgCsvLogFields                = [...]string{
 		"log_time",
 		"user_name",
 		"database_name",
@@ -74,10 +70,10 @@ func main() {
 	if err != nil {
 		log.Fatalln("Error setting up inotify watcher", err)
 	}
-	err = watcher.AddWatch(logDir, inotify.InModify)
-	if err != nil {
-		log.Fatalln("Error add inotify watch", err)
-	}
+	//err = watcher.AddWatch(logDir, inotify.InModify) // nolint:typecheck
+	//if err != nil {
+	//	log.Fatalln("Error add inotify watch", err)
+	//}
 
 	preprocChan := make(chan []string)
 	graylogChan := make(chan map[string]interface{})
