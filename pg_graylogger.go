@@ -11,7 +11,7 @@ import (
 	"time"
 	"regexp"
 	"encoding/csv"
-//~ csv "github.com/JensRantil/go-csv" // Alternative pythonistic but revers-compatible implementaion
+// csv "github.com/JensRantil/go-csv" // Alternative pythonistic but revers-compatible implementaion
 	"k8s.io/utils/inotify"
 	"gopkg.in/Graylog2/go-gelf.v2/gelf"
 )
@@ -23,65 +23,55 @@ const (
 )
 
 var (
+	DEBUG bool
 	show_ver bool
 	log_dir string
 	graylog_address string
-	facility string
 	depersonalize bool
 	pgcsvlog_fields = [...]string{
-		"_log_time",
-		"_user_name",
-		"_database_name",
-		"_process_id",
-		"_connection_from",
-		"_session_id",
-		"_session_line_num",
-		"_command_tag",
-		"_session_start_time",
-		"_virtual_transaction_id",
-		"_transaction_id",
-		"_error_severity",
-		"_sql_state_code",
-		"_message",
-		"_detail",
-		"_hint",
-		"_internal_query",
-		"_internal_query_pos",
-		"_context",
-		"_query",
-		"_query_pos",
-		"_location",
-		"_application_name",
-		"_backend_type",
+		"log_time",
+		"user_name",
+		"database_name",
+		"process_id",
+		"connection_from",
+		"session_id",
+		"session_line_num",
+		"command_tag",
+		"session_start_time",
+		"virtual_transaction_id",
+		"transaction_id",
+		"error_severity",
+		"sql_state_code",
+		"message",
+		"detail",
+		"hint",
+		"internal_query",
+		"internal_query_pos",
+		"context",
+		"query",
+		"query_pos",
+		"location",
+		"application_name",
+		"backend_type",
 	}
+	rowcache = make(map[string]string, 1024)
+	re_msg = regexp.MustCompile(`(?is)^(?:duration:\s(?P<duration>\d+\.\d{3})\sms\s*|)(?:(?:statement|execute .+?):\s*(?P<statement>.*?)\s*|)$`);
+	re_depers = regexp.MustCompile(`(?is)(VALUES|IN)\s*\((.*?)\)`)
 )
 
 func main() {
 	cli()
-	//log.SetOutput(io.MultiWriter(os.Stderr, gelfWriter))
 	watcher, err := inotify.NewWatcher()
 	if err != nil { log.Fatalln("Error setting up inotify watcher", err) }
 	err = watcher.AddWatch(log_dir, inotify.InModify)
 	if err != nil { log.Fatalln("Error add inotify watch", err) }
 
-	event_channel := make(chan *inotify.Event)
 	preproc_channel := make(chan []string)
 	graylog_channel := make(chan map[string]interface{})
 
 	go GraylogWriter(graylog_address, depersonalize, graylog_channel)
 	go RowsPreprocessor(preproc_channel, graylog_channel)
-	go CsvlogReader(event_channel, preproc_channel)
-
-	for {
-		select {
-		case event := <-watcher.Event:
-			if strings.HasSuffix(event.Name, ".csv") {
-				event_channel <- event
-			}
-		case err := <-watcher.Error:
-			log.Println("Inotify watch error:", err)
-			}
-	}
+	CsvlogReader(watcher, preproc_channel)
 }
 
 func cli(){
@@ -89,31 +79,53 @@ func cli(){
 		"Address of graylog in form of server:port")
 	flag.StringVar(&log_dir, "log-dir", "/var/log/postgresql",
 		"Path to postgresql log file in csv format")
-	flag.StringVar(&facility, "facility", os.Args[0],
-		"Facility field for log messages")
 	flag.BoolVar(&depersonalize, "depers", false,
 		"Depersonalize. Replace sensible information (field values) from query texts")
 	flag.BoolVar(&show_ver, "version", false, "Show version")
-
 	flag.Parse()
+	_, DEBUG = os.LookupEnv("DEBUG");
 	if show_ver{
 		fmt.Println(VERSION)
 	}
 }
 
-func CsvlogReader(event_ch <- chan *inotify.Event, row_ch chan <- []string){
-	// Firs event used for setting up reader and not checkin it lately in every iteration
-	event := <- event_ch
-	logFile, err := os.Open(event.Name); if err != nil { log.Fatal(err) }
-	reader := csv.NewReader(logFile)
-	reader.FieldsPerRecord = 0
-	reader.Read() //Read first row for setting number of field
-	logFile.Seek(0, os.SEEK_END)
-	fmt.Println("Begin reading file", event.Name, "at", time.Now())
-
-	for event = range event_ch{
+func CsvlogReader(watcher *inotify.Watcher, row_ch chan <- []string){
+	// First event used for setting up reader and not checkin it lately in every iteration
+	var err error
+	var event *inotify.Event
+	var logFile *os.File
+	var reader *csv.Reader
+	for event = range watcher.Event{
+		if strings.HasSuffix(event.Name, ".csv") {
+			logFile, err = os.Open(event.Name)
+			if err != nil { log.Fatalln("Error open log file", err) }
+			reader = csv.NewReader(logFile)
+			reader.FieldsPerRecord = 0
+			reader.Read() //Read first row for setting number of field
+			logFile.Seek(0, os.SEEK_END)
+			break
+		}
+	}
+	for {
+		select {
+			case event = <-watcher.Event:
+				if !strings.HasSuffix(event.Name, ".csv") {
+					continue
+				}
+			case err := <-watcher.Error:
+				log.Fatalln("Inotify watch error:", err)
+			}
+		if logFile.Name() != event.Name {
+			logFile.Close()
+			logFile, err = os.Open(event.Name)
+			if err != nil { log.Fatalln("Error open next log file:", err) }
+			fmt.Println("Begin reading new log file", event.Name, "at", time.Now())
+			reader = csv.NewReader(logFile)
+			reader.FieldsPerRecord = 0
+		}
 		for {
-			row, err := reader.Read()
+			row := make([]string, 0, len(pgcsvlog_fields)+1);
+			row, err = reader.Read()
 			if err == io.EOF {
 				break
 			}
@@ -124,54 +136,58 @@ func CsvlogReader(event_ch <- chan *inotify.Event, row_ch chan <- []string){
 			}
 			row_ch <- row
 		}
-		if logFile.Name() != event.Name {
-			logFile.Close()
-			logFile, err := os.Open(event.Name)
-			if err != nil { log.Fatalln("Error open next log file:", err) }
-			fmt.Println("Begin reading new log file", event.Name, "at", time.Now())
-			reader = csv.NewReader(logFile)
-			reader.FieldsPerRecord = 0
-		}
 	}
 	close(row_ch)
 }
 
 func RowsPreprocessor(row_ch <- chan []string, gelf_ch chan <- map[string]interface{}){
 	var err error
-	rowcache := map[string]map[string]interface{}{}
-	re := regexp.MustCompile(`(?is)(VALUES|IN)\s*\((.*?)\)`)
-
 	for row := range row_ch {
-		rowmap := map[string]interface{}{}
+		rowmap := make(map[string]interface{}, 32)
 		for i, v := range row{
-			if i==0{
-				ts, err := time.Parse(log_time_format, v)
+			switch pgcsvlog_fields[i] {
+			case "log_time": {
+				rowmap["log_time"], err = time.Parse(log_time_format, v)
 				if err != nil { log.Fatalln("Coundn't parse log time.", err) }
-				rowmap[pgcsvlog_fields[i]] = ts
-			} else {
-				rowmap[pgcsvlog_fields[i]] = v
+				}
+			case "message": {
+				switch matches := re_msg.FindStringSubmatch(v); {
+				case matches == nil || matches[0] == "": {
+					rowmap["message"] = v
+					}
+				case matches[1] != "" && matches[2] != "": {
+					rowmap["duration"], err = strconv.ParseFloat(matches[1], 64)
+					if err != nil { log.Fatalln("Could not read duration:", matches[1]) }
+					if depersonalize {
+						rowmap["statement"] = re_depers.ReplaceAllString(matches[2],
+							"$1 ( DEPERSONALIZED )")
+					} else {
+						rowmap["statement"] = matches[2]
+					}
+				}
+				case matches[1] != "": {
+					var ok bool
+					rowmap["duration"], err = strconv.ParseFloat(matches[1], 64)
+					if err != nil { log.Fatalln("Could not read duration:", matches[1]) }
+					rowmap["statement"], ok = rowcache[rowmap["session_id"].(string)]
+					if ok {
+						delete(rowcache, rowmap["session_id"].(string))
+					}
+				}
+				case matches[2] != "": {
+					if depersonalize {
+						rowcache[rowmap["session_id"].(string)] = re_depers.ReplaceAllString(
+							matches[2],
+							"$1 ( DEPERSONALIZED )")
+					} else {
+						rowcache[rowmap["session_id"].(string)] = matches[2]
+					}
+				}
+				}
 			}
-		}
-		if rowmap["_comand_tag"] != "" {
-			if strings.HasPrefix(rowmap["_message"].(string), "statement: "){
-				if depersonalize {
-					rowmap["_message"] = re.ReplaceAllString(rowmap["_message"].(string),
-						"$1 ( DEPERSONALIZED )")
-				}
-				rowcache[rowmap["_session_id"].(string)] = rowmap
-				continue
-			} else if strings.HasPrefix(rowmap["_message"].(string), "duration: "){
-				row, ok := rowcache[rowmap["_session_id"].(string)]
-				if ok {
-					delete(rowcache, rowmap["_session_id"].(string))
-					row["_duration"], err = strconv.ParseFloat(
-						rowmap["_message"].(string)[
-							len("duration: "):len(rowmap["_message"].(string))-3],
-						64)
-					if err != nil { log.Fatalln("Couldn't get statement duration as float", err) }
-					gelf_ch <- row
-					continue
-				}
+			default: {
+						rowmap[pgcsvlog_fields[i]] = v
+			}
 			}
 		}
 		gelf_ch <- rowmap
@@ -200,41 +216,47 @@ func GraylogWriter(graylog_address string, depersonalize bool,
 		}
 
 	for rowmap := range rowmap_ch{
-		ts := rowmap["_log_time"].(time.Time)
+		ts := rowmap["log_time"].(time.Time)
 		message.TimeUnix = float64(ts.Unix()) + (float64(ts.Nanosecond()) / 1000000000.)
-		delete(rowmap, "_log_time")
-		msg := rowmap["_message"].(string)
-		if len(msg) > short_msg_len {
-			ind := strings.Index(msg, "\n")
-			if ind >= 0{
-				message.Short = msg[:ind]
-			}else{
-				message.Short = msg[:short_msg_len+1]
+		delete(rowmap, "log_time")
+		if msg, ok := rowmap["message"]; ok {
+			if len(msg.(string)) > short_msg_len {
+				message.Short = msg.(string)[:short_msg_len]
+				message.Full = msg.(string)
+			} else {
+				message.Short = msg.(string)
+				message.Full = ""
 			}
-			message.Full = msg
+			delete(rowmap, "message")
 		} else {
-			message.Short = msg
 			message.Full = ""
+			if _, ok := rowmap["statement"]; ok {
+				if len(rowmap["statement"].(string)) > short_msg_len {
+					message.Short = rowmap["statement"].(string)[:short_msg_len]
+				} else {
+					message.Short = rowmap["statement"].(string)
+				}
+			}
 		}
-
-		delete(rowmap, "_message")
 		message.Extra = rowmap
 		gelfWriter.WriteMessage(&message)
 	}
 }
 
 func AlignToRow(file *os.File)(err error){
-	cur_time_str := time.Now().Format(log_time_format[:17])
+	cur_time_str := "\n" + time.Now().Format(log_time_format[:16])
+	// buf := make([]byte, 0, buf_size)
 	var bufarr [buf_size]byte
 	buf := bufarr[:]
 	ind := -1
 	var i,n int
+	pos, err := file.Seek(0, os.SEEK_CUR )
 	for i = 1 ; ind == -1 ; i++ {
-		_,err := file.Seek(-buf_size, os.SEEK_CUR )
-		if err != nil { log.Fatal("Could not seek to 1Mb from end of first log file", err) }
+		pos, err = file.Seek(pos - buf_size, os.SEEK_SET )
+		if err != nil { log.Fatalln("Could not seek to", i, "Mb from end of log file", err) }
 		n, err = file.Read(buf)
 		if err != nil { return err }
-		ind = bytes.LastIndex(buf, []byte("\n"+cur_time_str))
+		ind = bytes.LastIndex(buf, []byte(cur_time_str))
 	}
 	file.Seek(int64(ind-n+1), os.SEEK_CUR)
 	return err
