@@ -6,11 +6,13 @@ binding it to previous statement in a session and depersonalization (removing ex
 ```
 Usage of ./pg_graylogger:
   -depers
-    	Depersonalize. Replace sensible information (field values) from query texts
+        Depersonalize. Replace sensible information (field values) from query texts
+  -facility string
+        Facility field for log messages
   -graylog-address string
-    	Address of graylog in form of server:port (default "localhost:2345")
+        Address of graylog in form of server:port (default "localhost:2345")
   -log-dir string
-    	Path to postgresql log file in csv format (default "/var/log/postgresql")
+        Path to postgresql log file in csv format (default "/var/log/postgresql")
   -version
-    	Show version
+        Show version
 ```

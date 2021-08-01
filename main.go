@@ -3,19 +3,21 @@ package main
 import (
 	"bytes"
 	"encoding/csv"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
-	// csv "github.com/JensRantil/go-csv" // Alternative pythonistic but revers-compatible implementaion
+	"github.com/fsnotify/fsnotify"
 	"gopkg.in/Graylog2/go-gelf.v2/gelf"
-	"k8s.io/utils/inotify"
 )
 
 const (
@@ -27,10 +29,9 @@ const (
 )
 
 var (
-	Debug, showVer, depersonalize bool
-	logDir                        string
-	graylogAddress                string
-	pgCsvLogFields                = [...]string{
+	Debug, showVer, depersonalize    bool
+	logDir, graylogAddress, facility string
+	pgCsvLogFields                   = [...]string{
 		"log_time",
 		"user_name",
 		"database_name",
@@ -56,187 +57,242 @@ var (
 		"application_name",
 		"backend_type",
 	}
-	rowCache = make(map[string]string, 1024)
-	reMsg    = regexp.MustCompile("(?is)" +
+	statementsCache = make(map[string]string, 1024)
+	reMsg           = regexp.MustCompile("(?is)" +
 		`^(?:duration:\s(?P<duration>\d+\.\d{3})\sms\s*|)` +
 		`(?:(?:statement|execute .+?):\s*(?P<statement>.*?)\s*|)$`)
 	reDepers = regexp.MustCompile(`(?is)(VALUES|IN)\s*\((.*?)\)`)
 )
 
 func main() {
-	if showVer {
-		fmt.Println(Version)
-		os.Exit(0)
-	}
-	watcher, err := inotify.NewWatcher()
-	if err != nil {
-		log.Fatalln("Error setting up inotify watcher", err)
-	}
-	//err = watcher.AddWatch(logDir, inotify.InModify) // nolint:typecheck
-	//if err != nil {
-	//	log.Fatalln("Error add inotify watch", err)
-	//}
+	cli()
 
+	if Debug {
+		go func() { log.Println(http.ListenAndServe("localhost:6060", nil)) }()
+	}
 	preprocChan := make(chan []string)
 	graylogChan := make(chan map[string]interface{})
+	errChan := make(chan error)
 
-	go graylogWriter(graylogAddress, graylogChan)
-	go rowsPreproc(preprocChan, graylogChan)
-	err = csvLogReader(watcher, preprocChan)
-	if err != nil {
-		log.Fatalln("CSV log reader returned with error", err)
+	go graylogWriter(graylogAddress, graylogChan, errChan)
+	go rowsPreproc(preprocChan, graylogChan, errChan)
+	go csvLogReader(logDir, preprocChan, errChan)
+	// if err != nil {
+	// log.Fatalln("CSV log reader returned with error", err)
+	// }
+	var ok bool
+	err, ok := <-errChan
+	if ok && err != nil {
+		log.Fatalln(err)
 	}
 }
 
-func init() {
+func cli() {
 	flag.StringVar(&graylogAddress, "graylog-address", "localhost:2345",
 		"Address of graylog in form of server:port")
 	flag.StringVar(&logDir, "log-dir", "/var/log/postgresql",
 		"Path to postgresql log file in csv format")
+	flag.StringVar(&facility, "facility", "", "Facility field for log messages")
 	flag.BoolVar(&depersonalize, "depers", false,
 		"Depersonalize. Replace sensible information (field values) from query texts")
 	flag.BoolVar(&showVer, "version", false, "Show version")
 	flag.Parse()
+
 	_, Debug = os.LookupEnv("DEBUG")
+
+	if showVer {
+		fmt.Println(Version)
+		os.Exit(0)
+	}
 }
 
-func csvLogReader(watcher *inotify.Watcher, rowChan chan<- []string) (err error) {
+func csvLogReader(logDir string, rowChan chan<- []string, errChan chan<- error) {
 	// First event used for setting up reader and not checkin it lately in every iteration
 	defer close(rowChan)
-	var event *inotify.Event
+	var event fsnotify.Event
 	var logFile *os.File
 	var reader *csv.Reader
-	for event = range watcher.Event {
-		if strings.HasSuffix(event.Name, ".csv") {
-			logFile, err = os.Open(event.Name)
-			if err != nil {
-				log.Fatalln("Error open log file", err)
-			}
-			reader = csv.NewReader(logFile)
-			reader.FieldsPerRecord = 0
-			reader.Read() //Read first row for setting number of field
-			logFile.Seek(0, io.SeekEnd)
-			break
+	var row []string
+	var watcher *fsnotify.Watcher
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		errChan <- err
+		return
+	}
+	defer watcher.Close()
+	err = watcher.Add(logDir)
+	if err != nil {
+		errChan <- err
+		return
+	}
+
+	for event = range watcher.Events {
+		if event.Op != fsnotify.Write || !strings.HasSuffix(event.Name, ".csv") {
+			continue
 		}
+		log.Println("Begin reading log file", event.Name)
+		logFile, err = os.Open(event.Name)
+		if err != nil {
+			errChan <- err
+			return
+			// log.Fatalln("Error open log file", err)
+		}
+		reader = csv.NewReader(logFile)
+		reader.FieldsPerRecord = 0
+		_, err = reader.Read() // Read first row for setting number of fields
+		if err != nil {
+			errChan <- err
+			return
+		}
+		_, err = logFile.Seek(0, io.SeekEnd)
+		if err != nil {
+			errChan <- err
+			return
+		}
+		break
 	}
 	for {
 		select {
-		case event = <-watcher.Event:
-			if !strings.HasSuffix(event.Name, ".csv") {
+		case event := <-watcher.Events:
+			if event.Op != fsnotify.Write && !strings.HasSuffix(event.Name, ".csv") {
 				continue
 			}
-		case err := <-watcher.Error:
-			log.Fatalln("Inotify watch error:", err)
+		case err = <-watcher.Errors:
+			errChan <- err
+			return
+			// log.Fatalln("Fsnotify watch error:", err)
 		}
 		if logFile.Name() != event.Name {
 			logFile.Close()
 			logFile, err = os.Open(event.Name)
 			if err != nil {
-				log.Fatalln("Error open next log file:", err)
+				errChan <- err
+				return
+				// log.Fatalln("Error open next log file:", err)
 			}
-			fmt.Println("Begin reading new log file", event.Name, "at", time.Now())
+			log.Println("Begin reading new log file", event.Name, "at", time.Now())
 			reader = csv.NewReader(logFile)
 			reader.FieldsPerRecord = 0
 		}
+		err = watcher.Remove(logDir)
+		if err != nil {
+			errChan <- err
+			return
+		}
 		for {
-			row := make([]string, 0, len(pgCsvLogFields)+1)
+			// row := make([]string, 0, len(pgCsvLogFields)+5)
 			row, err = reader.Read()
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
+				if Debug {
+					log.Println("STATEMENT CACHE SIZE:", len(statementsCache))
+				}
+				time.Sleep(time.Second)
 				break
 			}
 			if err != nil {
 				err = AlignToRow(logFile)
 				if err != nil {
-					log.Fatalln("Error reading next row", err)
+					errChan <- err
+					return
+					// log.Fatalln("Error reading next row", err)
 				}
+				reader = csv.NewReader(logFile)
+				time.Sleep(time.Second)
 				continue
 			}
 			rowChan <- row
 		}
+		err = watcher.Add(logDir)
+		if err != nil {
+			errChan <- err
+			return
+		}
 	}
-	return
 }
 
-func rowsPreproc(rowChan <-chan []string, gelfChan chan<- map[string]interface{}) (err error) {
+func rowsPreproc(rowChan <-chan []string,
+	gelfChan chan<- map[string]interface{},
+	errChan chan<- error) {
+	var err error
 	defer close(gelfChan)
 	for row := range rowChan {
 		rowMap := make(map[string]interface{}, 32)
 		for index, value := range row {
 			switch pgCsvLogFields[index] {
 			case "log_time":
-				{
-					rowMap["log_time"], err = time.Parse(logTimeFormat, value)
-					if err != nil {
-						log.Fatalln("Coundn't parse log time.", err)
-					}
+				rowMap["log_time"], err = time.Parse(logTimeFormat, value)
+				if err != nil {
+					errChan <- err
+					return
+					// log.Fatalln("Coundn't parse log time.", err)
 				}
 			case "message":
-				{
-					switch matches := reMsg.FindStringSubmatch(value); {
-					case matches == nil || matches[0] == "":
-						{
-							rowMap["message"] = value
-						}
-					case matches[1] != "" && matches[2] != "":
-						{
-							rowMap["duration"], err = strconv.ParseFloat(matches[1], 64)
-							if err != nil {
-								log.Fatalln("Could not read duration:", matches[1])
-							}
-							if depersonalize {
-								rowMap["statement"] = reDepers.ReplaceAllString(matches[2],
-									"$1 ( DEPERSONALIZED )")
-							} else {
-								rowMap["statement"] = matches[2]
-							}
-						}
-					case matches[1] != "":
-						{
-							var ok bool
-							rowMap["duration"], err = strconv.ParseFloat(matches[1], 64)
-							if err != nil {
-								log.Fatalln("Could not read duration:", matches[1])
-							}
-							rowMap["statement"], ok = rowCache[rowMap["session_id"].(string)]
-							if ok {
-								delete(rowCache, rowMap["session_id"].(string))
-							}
-						}
-					case matches[2] != "":
-						{
-							if depersonalize {
-								rowCache[rowMap["session_id"].(string)] = reDepers.ReplaceAllString(
-									matches[2],
-									"$1 ( DEPERSONALIZED )")
-							} else {
-								rowCache[rowMap["session_id"].(string)] = matches[2]
-							}
-						}
+				switch matches := reMsg.FindStringSubmatch(value); {
+				case len(matches) == 0 || matches[0] == "":
+					rowMap["message"] = value
+				case matches[1] != "" && matches[2] != "":
+					rowMap["duration"], err = strconv.ParseFloat(matches[1], 64)
+					if err != nil {
+						errChan <- err
+						return
+						// log.Fatalln("Could not read duration:", matches[1])
+					}
+					if depersonalize {
+						rowMap["statement"] = reDepers.ReplaceAllString(matches[2],
+							"$1 ( DEPERSONALIZED )")
+					} else {
+						rowMap["statement"] = matches[2]
+					}
+				case matches[1] != "":
+					var ok bool
+					rowMap["duration"], err = strconv.ParseFloat(matches[1], 64)
+					if err != nil {
+						errChan <- err
+						return
+						// log.Fatalln("Could not read duration:", matches[1])
+					}
+					rowMap["statement"], ok = statementsCache[rowMap["session_id"].(string)]
+					if ok {
+						delete(statementsCache, rowMap["session_id"].(string))
+					}
+				case matches[2] != "":
+					if depersonalize {
+						statementsCache[rowMap["session_id"].(string)] = reDepers.ReplaceAllString(
+							matches[2],
+							"$1 ( DEPERSONALIZED )")
+					} else {
+						statementsCache[rowMap["session_id"].(string)] = matches[2]
 					}
 				}
 			default:
-				{
-					rowMap[pgCsvLogFields[index]] = value
-				}
+				rowMap[pgCsvLogFields[index]] = value
 			}
 		}
 		gelfChan <- rowMap
 	}
-	return
 }
 
-func graylogWriter(graylogAddress string, rowMapChan <-chan map[string]interface{}) (err error) {
-	fmt.Println("Begin logging to graylog server:", graylogAddress)
+func graylogWriter(
+	graylogAddress string,
+	rowMapChan <-chan map[string]interface{},
+	errChan chan<- error) {
+	var err error
+	var hostname string
+	hostname, err = os.Hostname()
+	if err != nil {
+		errChan <- err
+		return
+		// log.Fatalln("Error to get hostname.", err)
+	}
+	log.Println("Begin expoting logs to graylog server:", graylogAddress)
 	gelfWriter, err := gelf.NewUDPWriter(graylogAddress)
 	if err != nil {
-		log.Fatalln("Error setting up UPDGelf:", err)
+		errChan <- err
+		return
+		// log.Fatalln("Error setting up UPDGelf:", err)
 	}
 	defer gelfWriter.Close()
 
-	hostname, err := os.Hostname()
-	if err != nil {
-		log.Fatalln("Error to get hostname.", err)
-	}
 	message := gelf.Message{
 		Version:  "1.1",
 		Host:     hostname,
@@ -244,43 +300,48 @@ func graylogWriter(graylogAddress string, rowMapChan <-chan map[string]interface
 		Full:     "",
 		TimeUnix: 0.0,
 		Level:    1,
-		Facility: "",
+		Facility: facility,
 		Extra:    nil,
 		// RawExtra: json.RawMessage,
 	}
 
 	for rowMap := range rowMapChan {
-		ts := rowMap["log_time"].(time.Time)
-		message.TimeUnix = float64(ts.Unix()) + (float64(ts.Nanosecond()) / nanoSec)
-		delete(rowMap, "log_time")
-		if msg, ok := rowMap["message"]; ok {
-			if len(msg.(string)) > shortMsgLen {
-				message.Short = msg.(string)[:shortMsgLen]
-				message.Full = msg.(string)
+		message.Full = ""
+		if ts, ok := rowMap["log_time"].(time.Time); ok {
+			message.TimeUnix = float64(ts.Unix()) + (float64(ts.Nanosecond()) / nanoSec)
+			delete(rowMap, "log_time")
+		} else {
+			log.Println("No timestamp")
+			continue
+		}
+		if msg, ok := rowMap["message"].(string); ok {
+			if len(msg) > shortMsgLen {
+				message.Short = msg[:shortMsgLen]
+				message.Full = msg
 			} else {
-				message.Short = msg.(string)
+				message.Short = msg
 				message.Full = ""
 			}
 			delete(rowMap, "message")
-		} else {
-			message.Full = ""
-			if _, ok := rowMap["statement"]; ok {
-				if len(rowMap["statement"].(string)) > shortMsgLen {
-					message.Short = rowMap["statement"].(string)[:shortMsgLen]
-				} else {
-					message.Short = rowMap["statement"].(string)
-				}
+		} else if statement, ok := rowMap["statement"].(string); ok {
+			if len(statement) > shortMsgLen {
+				message.Short = statement[:shortMsgLen]
+			} else {
+				message.Short = statement
 			}
 		}
 		message.Extra = rowMap
-		gelfWriter.WriteMessage(&message)
+		err = gelfWriter.WriteMessage(&message)
+		if err != nil {
+			errChan <- err
+			return
+		}
 	}
-	return
 }
 
 type AlignError struct {
-	Position int
 	Err      error
+	Position int
 }
 
 func (e *AlignError) Error() string {
@@ -294,7 +355,11 @@ func AlignToRow(file *os.File) (err error) {
 	buf := bufArr[:]
 	index := -1
 	var n int
-	pos, err := file.Seek(0, io.SeekCurrent)
+	var pos int64
+	pos, err = file.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return
+	}
 	for i := 1; index == -1; i++ {
 		pos, err = file.Seek(pos-bufSize, io.SeekStart)
 		if err != nil {
@@ -304,7 +369,7 @@ func AlignToRow(file *os.File) (err error) {
 		if err != nil {
 			return
 		}
-		index = bytes.LastIndex(buf, []byte(curTimeStr))
+		index = bytes.LastIndex(buf[:n], []byte(curTimeStr))
 	}
 	_, err = file.Seek(int64(index-n+1), io.SeekCurrent)
 	return

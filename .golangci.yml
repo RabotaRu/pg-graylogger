@@ -93,7 +93,7 @@ linters-settings:
     # Forbid the following identifiers (identifiers are written using regexp):
     forbid:
       - ^print.*$
-      - 'fmt\.Print.*'
+    # - 'fmt\.Print.*'
     # Exclude godoc examples from forbidigo checks.  Default is true.
     exclude_godoc_examples: false
 
