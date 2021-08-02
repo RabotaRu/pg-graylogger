@@ -77,9 +77,7 @@ func main() {
 	go graylogWriter(graylogAddress, graylogChan, errChan)
 	go rowsPreproc(preprocChan, graylogChan, errChan)
 	go csvLogReader(logDir, preprocChan, errChan)
-	// if err != nil {
-	// log.Fatalln("CSV log reader returned with error", err)
-	// }
+
 	var ok bool
 	err, ok := <-errChan
 	if ok && err != nil {
@@ -126,6 +124,8 @@ func csvLogReader(logDir string, rowChan chan<- []string, errChan chan<- error) 
 		return
 	}
 
+	// row := make([]string, 0, len(pgCsvLogFields)+5)
+
 	for event = range watcher.Events {
 		if event.Op != fsnotify.Write || !strings.HasSuffix(event.Name, ".csv") {
 			continue
@@ -133,9 +133,8 @@ func csvLogReader(logDir string, rowChan chan<- []string, errChan chan<- error) 
 		log.Println("Begin reading log file", event.Name)
 		logFile, err = os.Open(event.Name)
 		if err != nil {
-			errChan <- err
+			errChan <- fmt.Errorf("error open log file: %w", err)
 			return
-			// log.Fatalln("Error open log file", err)
 		}
 		reader = csv.NewReader(logFile)
 		reader.FieldsPerRecord = 0
@@ -149,26 +148,35 @@ func csvLogReader(logDir string, rowChan chan<- []string, errChan chan<- error) 
 			errChan <- err
 			return
 		}
+		err = watcher.Remove(logDir)
+		if err != nil {
+			errChan <- err
+			return
+		}
 		break
 	}
+
 	for {
+		err = watcher.Add(logDir)
+		if err != nil {
+			errChan <- err
+			return
+		}
 		select {
-		case event := <-watcher.Events:
-			if event.Op != fsnotify.Write && !strings.HasSuffix(event.Name, ".csv") {
+		case event = <-watcher.Events:
+			if event.Op != fsnotify.Write || !strings.HasSuffix(event.Name, ".csv") {
 				continue
 			}
 		case err = <-watcher.Errors:
-			errChan <- err
+			errChan <- fmt.Errorf("fsnotify watch error: %w", err)
 			return
-			// log.Fatalln("Fsnotify watch error:", err)
 		}
 		if logFile.Name() != event.Name {
 			logFile.Close()
 			logFile, err = os.Open(event.Name)
 			if err != nil {
-				errChan <- err
+				errChan <- fmt.Errorf("error open next log file: %w", err)
 				return
-				// log.Fatalln("Error open next log file:", err)
 			}
 			log.Println("Begin reading new log file", event.Name, "at", time.Now())
 			reader = csv.NewReader(logFile)
@@ -180,7 +188,6 @@ func csvLogReader(logDir string, rowChan chan<- []string, errChan chan<- error) 
 			return
 		}
 		for {
-			// row := make([]string, 0, len(pgCsvLogFields)+5)
 			row, err = reader.Read()
 			if errors.Is(err, io.EOF) {
 				if Debug {
@@ -192,20 +199,14 @@ func csvLogReader(logDir string, rowChan chan<- []string, errChan chan<- error) 
 			if err != nil {
 				err = AlignToRow(logFile)
 				if err != nil {
-					errChan <- err
+					errChan <- fmt.Errorf("problem reading next row: %w", err)
 					return
-					// log.Fatalln("Error reading next row", err)
 				}
 				reader = csv.NewReader(logFile)
 				time.Sleep(time.Second)
 				continue
 			}
 			rowChan <- row
-		}
-		err = watcher.Add(logDir)
-		if err != nil {
-			errChan <- err
-			return
 		}
 	}
 }
@@ -222,9 +223,8 @@ func rowsPreproc(rowChan <-chan []string,
 			case "log_time":
 				rowMap["log_time"], err = time.Parse(logTimeFormat, value)
 				if err != nil {
-					errChan <- err
+					errChan <- fmt.Errorf("coundn't parse log time: %w", err)
 					return
-					// log.Fatalln("Coundn't parse log time.", err)
 				}
 			case "message":
 				switch matches := reMsg.FindStringSubmatch(value); {
@@ -233,9 +233,8 @@ func rowsPreproc(rowChan <-chan []string,
 				case matches[1] != "" && matches[2] != "":
 					rowMap["duration"], err = strconv.ParseFloat(matches[1], 64)
 					if err != nil {
-						errChan <- err
+						errChan <- fmt.Errorf("could not read duration: %v", matches[1])
 						return
-						// log.Fatalln("Could not read duration:", matches[1])
 					}
 					if depersonalize {
 						rowMap["statement"] = reDepers.ReplaceAllString(matches[2],
@@ -247,9 +246,8 @@ func rowsPreproc(rowChan <-chan []string,
 					var ok bool
 					rowMap["duration"], err = strconv.ParseFloat(matches[1], 64)
 					if err != nil {
-						errChan <- err
+						errChan <- fmt.Errorf("could not read duration: %v", matches[1])
 						return
-						// log.Fatalln("Could not read duration:", matches[1])
 					}
 					rowMap["statement"], ok = statementsCache[rowMap["session_id"].(string)]
 					if ok {
@@ -280,16 +278,14 @@ func graylogWriter(
 	var hostname string
 	hostname, err = os.Hostname()
 	if err != nil {
-		errChan <- err
+		errChan <- fmt.Errorf("problem getting hostname: %w", err)
 		return
-		// log.Fatalln("Error to get hostname.", err)
 	}
 	log.Println("Begin expoting logs to graylog server:", graylogAddress)
 	gelfWriter, err := gelf.NewUDPWriter(graylogAddress)
 	if err != nil {
-		errChan <- err
+		errChan <- fmt.Errorf("problem setting up UPDGelf: %w", err)
 		return
-		// log.Fatalln("Error setting up UPDGelf:", err)
 	}
 	defer gelfWriter.Close()
 
