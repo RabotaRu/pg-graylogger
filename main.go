@@ -21,11 +21,12 @@ import (
 )
 
 const (
-	Version       = "v0.1.0"
+	Version       = "v0.2.0"
 	bufSize       = 1024 * 1024
 	logTimeFormat = "2006-01-02 15:04:05.000 MST"
 	shortMsgLen   = 100
 	nanoSec       = 1000000000.0
+	maxStmtLen    = 7 * 1024
 )
 
 var (
@@ -57,11 +58,6 @@ var (
 		"application_name",
 		"backend_type",
 	}
-	statementsCache = make(map[string]string, 1024)
-	reMsg           = regexp.MustCompile("(?is)" +
-		`^(?:duration:\s(?P<duration>\d+\.\d{3})\sms\s*|)` +
-		`(?:(?:statement|execute .+?):\s*(?P<statement>.*?)\s*|)$`)
-	reDepers = regexp.MustCompile(`(?is)(VALUES|IN)\s*\((.*?)\)`)
 )
 
 func main() {
@@ -114,13 +110,13 @@ func csvLogReader(logDir string, rowChan chan<- []string, errChan chan<- error) 
 	var watcher *fsnotify.Watcher
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		errChan <- err
+		errChan <- fmt.Errorf("error creating fsntofiy.watcher: %w", err)
 		return
 	}
 	defer watcher.Close()
 	err = watcher.Add(logDir)
 	if err != nil {
-		errChan <- err
+		errChan <- fmt.Errorf("error adding %v path to fsnotify watcher: %w", logDir, err)
 		return
 	}
 
@@ -140,17 +136,17 @@ func csvLogReader(logDir string, rowChan chan<- []string, errChan chan<- error) 
 		reader.FieldsPerRecord = 0
 		_, err = reader.Read() // Read first row for setting number of fields
 		if err != nil {
-			errChan <- err
+			errChan <- fmt.Errorf("error reading first row: %w", err)
 			return
 		}
 		_, err = logFile.Seek(0, io.SeekEnd)
 		if err != nil {
-			errChan <- err
+			errChan <- fmt.Errorf("error seeking to the end of log file: %w", err)
 			return
 		}
 		err = watcher.Remove(logDir)
 		if err != nil {
-			errChan <- err
+			errChan <- fmt.Errorf("error removing %v path from fsnotify.watcher: %w", logDir, err)
 			return
 		}
 		break
@@ -159,7 +155,7 @@ func csvLogReader(logDir string, rowChan chan<- []string, errChan chan<- error) 
 	for {
 		err = watcher.Add(logDir)
 		if err != nil {
-			errChan <- err
+			errChan <- fmt.Errorf("error adding %v path to fsnotify.watcher: %w", logDir, err)
 			return
 		}
 		select {
@@ -184,15 +180,12 @@ func csvLogReader(logDir string, rowChan chan<- []string, errChan chan<- error) 
 		}
 		err = watcher.Remove(logDir)
 		if err != nil {
-			errChan <- err
+			errChan <- fmt.Errorf("error removing %v path from fsnotify.watcher: %w", logDir, err)
 			return
 		}
 		for {
 			row, err = reader.Read()
 			if errors.Is(err, io.EOF) {
-				if Debug {
-					log.Println("STATEMENT CACHE SIZE:", len(statementsCache))
-				}
 				time.Sleep(time.Second)
 				break
 			}
@@ -214,10 +207,19 @@ func csvLogReader(logDir string, rowChan chan<- []string, errChan chan<- error) 
 func rowsPreproc(rowChan <-chan []string,
 	gelfChan chan<- map[string]interface{},
 	errChan chan<- error) {
-	var err error
 	defer close(gelfChan)
-	for row := range rowChan {
-		rowMap := make(map[string]interface{}, 32)
+	var err error
+	var row []string
+	var matches []string
+	var rowMap map[string]interface{}
+	statementsCache := make(map[string]string, 1024)
+	reMsg := regexp.MustCompile("(?is)" +
+		`^(?:duration:\s(?P<duration>\d+\.\d{3})\sms\s*|)` +
+		`(?:(?:statement|execute .+?):\s*(?P<statement>.*?)\s*|)$`)
+	reDepers := regexp.MustCompile(`(?is)(VALUES|IN)\s*\((.*?)\)`)
+
+	for row = range rowChan {
+		rowMap = make(map[string]interface{}, 32)
 		for index, value := range row {
 			switch pgCsvLogFields[index] {
 			case "log_time":
@@ -227,7 +229,14 @@ func rowsPreproc(rowChan <-chan []string,
 					return
 				}
 			case "message":
-				switch matches := reMsg.FindStringSubmatch(value); {
+				if depersonalize {
+					value = reDepers.ReplaceAllString(value, "$1 ( DEPERSONALIZED )")
+				}
+				if vs := len(value); vs > maxStmtLen {
+					value = value[:maxStmtLen]
+					rowMap["huge_msg"] = vs
+				}
+				switch matches = reMsg.FindStringSubmatch(value); {
 				case len(matches) == 0 || matches[0] == "":
 					rowMap["message"] = value
 				case matches[1] != "" && matches[2] != "":
@@ -236,12 +245,7 @@ func rowsPreproc(rowChan <-chan []string,
 						errChan <- fmt.Errorf("could not read duration: %v", matches[1])
 						return
 					}
-					if depersonalize {
-						rowMap["statement"] = reDepers.ReplaceAllString(matches[2],
-							"$1 ( DEPERSONALIZED )")
-					} else {
-						rowMap["statement"] = matches[2]
-					}
+					rowMap["statement"] = matches[2]
 				case matches[1] != "":
 					var ok bool
 					rowMap["duration"], err = strconv.ParseFloat(matches[1], 64)
@@ -253,14 +257,15 @@ func rowsPreproc(rowChan <-chan []string,
 					if ok {
 						delete(statementsCache, rowMap["session_id"].(string))
 					}
+					delete(rowMap, "message")
 				case matches[2] != "":
-					if depersonalize {
-						statementsCache[rowMap["session_id"].(string)] = reDepers.ReplaceAllString(
-							matches[2],
-							"$1 ( DEPERSONALIZED )")
-					} else {
-						statementsCache[rowMap["session_id"].(string)] = matches[2]
-					}
+					statementsCache[rowMap["session_id"].(string)] = matches[2]
+				}
+			case "query":
+				if depersonalize {
+					rowMap["query"] = reDepers.ReplaceAllString(value, "$1 ( DEPERSONALIZED )")
+				} else {
+					rowMap["query"] = value
 				}
 			default:
 				rowMap[pgCsvLogFields[index]] = value
@@ -307,7 +312,7 @@ func graylogWriter(
 			message.TimeUnix = float64(ts.Unix()) + (float64(ts.Nanosecond()) / nanoSec)
 			delete(rowMap, "log_time")
 		} else {
-			log.Println("No timestamp")
+			log.Println("timestamp is missing in a row")
 			continue
 		}
 		if msg, ok := rowMap["message"].(string); ok {
@@ -329,7 +334,7 @@ func graylogWriter(
 		message.Extra = rowMap
 		err = gelfWriter.WriteMessage(&message)
 		if err != nil {
-			errChan <- err
+			errChan <- fmt.Errorf("error writing message (UDP GELF): %w", err)
 			return
 		}
 	}
