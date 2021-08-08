@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	Version       = "v0.2.0"
+	Version       = "v0.2.5"
 	bufSize       = 1024 * 1024
 	logTimeFormat = "2006-01-02 15:04:05.000 MST"
 	shortMsgLen   = 100
@@ -103,10 +103,8 @@ func cli() {
 func csvLogReader(logDir string, rowChan chan<- []string, errChan chan<- error) {
 	// First event used for setting up reader and not checkin it lately in every iteration
 	defer close(rowChan)
-	var event fsnotify.Event
 	var logFile *os.File
 	var reader *csv.Reader
-	var row []string
 	var watcher *fsnotify.Watcher
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -114,38 +112,44 @@ func csvLogReader(logDir string, rowChan chan<- []string, errChan chan<- error) 
 		return
 	}
 	defer watcher.Close()
-	err = watcher.Add(logDir)
-	if err != nil {
+	if err = watcher.Add(logDir); err != nil {
 		errChan <- fmt.Errorf("error adding %v path to fsnotify watcher: %w", logDir, err)
 		return
 	}
 
-	// row := make([]string, 0, len(pgCsvLogFields)+5)
-
-	for event = range watcher.Events {
-		if event.Op != fsnotify.Write || !strings.HasSuffix(event.Name, ".csv") {
-			continue
-		}
-		log.Println("Begin reading log file", event.Name)
-		logFile, err = os.Open(event.Name)
-		if err != nil {
-			errChan <- fmt.Errorf("error open log file: %w", err)
+	for {
+		select {
+		case event := <-watcher.Events:
+			if event.Op != fsnotify.Write || !strings.HasSuffix(event.Name, ".csv") {
+				continue
+			}
+			log.Println("Begin reading log file", event.Name)
+			logFile, err = os.Open(event.Name)
+			if err != nil {
+				errChan <- fmt.Errorf("error open log file: %w", err)
+				return
+			}
+		case err = <-watcher.Errors:
+			errChan <- fmt.Errorf("fsnotify watch error: %w", err)
 			return
 		}
 		reader = csv.NewReader(logFile)
 		reader.FieldsPerRecord = 0
-		_, err = reader.Read() // Read first row for setting number of fields
-		if err != nil {
+		// Read first row for setting number of fields
+		if _, err = reader.Read(); err != nil {
 			errChan <- fmt.Errorf("error reading first row: %w", err)
 			return
 		}
-		_, err = logFile.Seek(0, io.SeekEnd)
-		if err != nil {
+		if _, err = logFile.Seek(0, io.SeekEnd); err != nil {
 			errChan <- fmt.Errorf("error seeking to the end of log file: %w", err)
 			return
 		}
-		err = watcher.Remove(logDir)
-		if err != nil {
+		if err = AlignToRow(logFile); err != nil {
+			errChan <- fmt.Errorf("problem reading next row: %w", err)
+			return
+		}
+		reader = csv.NewReader(logFile)
+		if err = watcher.Remove(logDir); err != nil {
 			errChan <- fmt.Errorf("error removing %v path from fsnotify.watcher: %w", logDir, err)
 			return
 		}
@@ -153,50 +157,49 @@ func csvLogReader(logDir string, rowChan chan<- []string, errChan chan<- error) 
 	}
 
 	for {
-		err = watcher.Add(logDir)
-		if err != nil {
+		if err = watcher.Add(logDir); err != nil {
 			errChan <- fmt.Errorf("error adding %v path to fsnotify.watcher: %w", logDir, err)
 			return
 		}
 		select {
-		case event = <-watcher.Events:
+		case event := <-watcher.Events:
 			if event.Op != fsnotify.Write || !strings.HasSuffix(event.Name, ".csv") {
 				continue
+			}
+			if logFile.Name() != event.Name {
+				logFile.Close()
+				logFile, err = os.Open(event.Name)
+				if err != nil {
+					errChan <- fmt.Errorf("error open next log file: %w", err)
+					return
+				}
+				log.Println("Begin reading new log file:", event.Name)
+				reader = csv.NewReader(logFile)
+				reader.FieldsPerRecord = 0
 			}
 		case err = <-watcher.Errors:
 			errChan <- fmt.Errorf("fsnotify watch error: %w", err)
 			return
 		}
-		if logFile.Name() != event.Name {
-			logFile.Close()
-			logFile, err = os.Open(event.Name)
-			if err != nil {
-				errChan <- fmt.Errorf("error open next log file: %w", err)
-				return
-			}
-			log.Println("Begin reading new log file", event.Name, "at", time.Now())
-			reader = csv.NewReader(logFile)
-			reader.FieldsPerRecord = 0
-		}
-		err = watcher.Remove(logDir)
-		if err != nil {
+		if err = watcher.Remove(logDir); err != nil {
 			errChan <- fmt.Errorf("error removing %v path from fsnotify.watcher: %w", logDir, err)
 			return
 		}
+
 		for {
-			row, err = reader.Read()
+			row, err := reader.Read()
 			if errors.Is(err, io.EOF) {
 				time.Sleep(time.Second)
 				break
 			}
 			if err != nil {
-				err = AlignToRow(logFile)
-				if err != nil {
+				if err = AlignToRow(logFile); err != nil {
 					errChan <- fmt.Errorf("problem reading next row: %w", err)
 					return
 				}
 				reader = csv.NewReader(logFile)
-				time.Sleep(time.Second)
+				reader.FieldsPerRecord = 0
+				time.Sleep(time.Second / 10)
 				continue
 			}
 			rowChan <- row
@@ -209,17 +212,14 @@ func rowsPreproc(rowChan <-chan []string,
 	errChan chan<- error) {
 	defer close(gelfChan)
 	var err error
-	var row []string
-	var matches []string
-	var rowMap map[string]interface{}
-	statementsCache := make(map[string]string, 1024)
+	statementsCache := make(map[interface{}]string, 1024)
 	reMsg := regexp.MustCompile("(?is)" +
 		`^(?:duration:\s(?P<duration>\d+\.\d{3})\sms\s*|)` +
 		`(?:(?:statement|execute .+?):\s*(?P<statement>.*?)\s*|)$`)
 	reDepers := regexp.MustCompile(`(?is)(VALUES|IN)\s*\((.*?)\)`)
 
-	for row = range rowChan {
-		rowMap = make(map[string]interface{}, 32)
+	for row := range rowChan {
+		rowMap := make(map[string]interface{}, 32)
 		for index, value := range row {
 			switch pgCsvLogFields[index] {
 			case "log_time":
@@ -236,7 +236,7 @@ func rowsPreproc(rowChan <-chan []string,
 					value = value[:maxStmtLen]
 					rowMap["huge_msg"] = vs
 				}
-				switch matches = reMsg.FindStringSubmatch(value); {
+				switch matches := reMsg.FindStringSubmatch(value); {
 				case len(matches) == 0 || matches[0] == "":
 					rowMap["message"] = value
 				case matches[1] != "" && matches[2] != "":
@@ -247,19 +247,32 @@ func rowsPreproc(rowChan <-chan []string,
 					}
 					rowMap["statement"] = matches[2]
 				case matches[1] != "":
-					var ok bool
 					rowMap["duration"], err = strconv.ParseFloat(matches[1], 64)
 					if err != nil {
 						errChan <- fmt.Errorf("could not read duration: %v", matches[1])
 						return
 					}
-					rowMap["statement"], ok = statementsCache[rowMap["session_id"].(string)]
-					if ok {
-						delete(statementsCache, rowMap["session_id"].(string))
+					switch rowMap["command_tag"] {
+					case "BIND", "PARSE":
+						break
+					default:
+						if statement, ok := statementsCache[rowMap["session_id"]]; ok {
+							rowMap["statement"] = statement
+							delete(statementsCache, rowMap["session_id"])
+						}
 					}
-					delete(rowMap, "message")
 				case matches[2] != "":
-					statementsCache[rowMap["session_id"].(string)] = matches[2]
+					statementsCache[rowMap["session_id"]] = matches[2]
+				}
+			case "error_severity":
+				switch value {
+				case "ERROR", "FATAL":
+					if statement, ok := statementsCache[rowMap["session_id"]]; ok {
+						rowMap["statement"] = statement
+						delete(statementsCache, rowMap["session_id"])
+					}
+				default:
+					rowMap["error_serverity"] = value
 				}
 			case "query":
 				if depersonalize {
@@ -279,9 +292,7 @@ func graylogWriter(
 	graylogAddress string,
 	rowMapChan <-chan map[string]interface{},
 	errChan chan<- error) {
-	var err error
-	var hostname string
-	hostname, err = os.Hostname()
+	hostname, err := os.Hostname()
 	if err != nil {
 		errChan <- fmt.Errorf("problem getting hostname: %w", err)
 		return
@@ -294,20 +305,18 @@ func graylogWriter(
 	}
 	defer gelfWriter.Close()
 
-	message := gelf.Message{
-		Version:  "1.1",
-		Host:     hostname,
-		Short:    "",
-		Full:     "",
-		TimeUnix: 0.0,
-		Level:    1,
-		Facility: facility,
-		Extra:    nil,
-		// RawExtra: json.RawMessage,
-	}
-
 	for rowMap := range rowMapChan {
-		message.Full = ""
+		message := gelf.Message{
+			Version:  "1.1",
+			Host:     hostname,
+			Short:    "",
+			Full:     "",
+			TimeUnix: 0.0,
+			Level:    1,
+			Facility: facility,
+			Extra:    nil,
+			// RawExtra: json.RawMessage,
+		}
 		if ts, ok := rowMap["log_time"].(time.Time); ok {
 			message.TimeUnix = float64(ts.Unix()) + (float64(ts.Nanosecond()) / nanoSec)
 			delete(rowMap, "log_time")
@@ -351,9 +360,7 @@ func (e *AlignError) Error() string {
 
 func AlignToRow(file *os.File) (err error) {
 	curTimeStr := "\n" + time.Now().Format(logTimeFormat[:16])
-	// buf := make([]byte, 0, bufSize)
-	var bufArr [bufSize]byte
-	buf := bufArr[:]
+	buf := make([]byte, bufSize)
 	index := -1
 	var n int
 	var pos int64
