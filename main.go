@@ -30,10 +30,10 @@ const (
 )
 
 var (
-	Debug, showVer, depersonalize    bool
-	logDir, graylogAddress, facility string
-	cacheSize                        int
-	pgCsvLogFields                   = [...]string{
+	showVer, depersonalize                  bool
+	debug, logDir, graylogAddress, facility string
+	cacheSize                               int
+	pgCsvLogFields                          = [...]string{
 		"log_time",
 		"user_name",
 		"database_name",
@@ -78,8 +78,8 @@ func main() {
 		os.Exit(0)
 	}
 
-	if _, Debug = os.LookupEnv("DEBUG"); Debug {
-		go func() { log.Println(http.ListenAndServe("localhost:6060", nil)) }()
+	if debug = os.Getenv("DEBUG"); debug != "" {
+		go func() { log.Println(http.ListenAndServe(debug, nil)) }()
 	}
 
 	preprocChan := make(chan []string)
