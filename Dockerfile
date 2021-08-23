@@ -27,5 +27,4 @@ FROM scratch
 LABEL maintainer="o.marin@rabota.ru"
 COPY --from=builder /pg_graylogger /bin/
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-VOLUME /var/log/postgresql
 ENTRYPOINT ["/bin/pg_graylogger"]
