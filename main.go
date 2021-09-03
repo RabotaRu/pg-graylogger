@@ -12,6 +12,7 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -21,7 +22,7 @@ import (
 )
 
 const (
-	Version       = "v0.5.0"
+	Version       = "v0.6.0"
 	bufSize       = 1024 * 1024
 	logTimeFormat = "2006-01-02 15:04:05.000 MST"
 	shortMsgLen   = 100
@@ -101,6 +102,7 @@ func csvLogReader(logDir string, rowChan chan<- []string, errChan chan<- error) 
 	defer close(rowChan)
 	var log_file *logFile
 	defer log_file.Close()
+	var skipedfirst bool
 	var csvReader *csv.Reader
 	var watcher *inotify.Watcher
 	watcher, err := inotify.NewWatcher()
@@ -111,16 +113,21 @@ func csvLogReader(logDir string, rowChan chan<- []string, errChan chan<- error) 
 	defer watcher.Close()
 	for {
 		var event *inotify.Event
-		if err = watcher.AddWatch(logDir, inotify.InModify|inotify.InCloseWrite); err != nil {
+		if err = watcher.AddWatch(logDir, inotify.InModify); err != nil {
 			errChan <- fmt.Errorf("error adding %v path to inotify.Watcher: %w", logDir, err)
 			return
 		}
 		select {
 		case event = <-watcher.Event:
-			if !strings.HasSuffix(event.Name, ".csv") ||
-				(log_file != nil && event.Name == log_file.Name()) {
+			if !strings.HasSuffix(event.Name, ".csv") {
 				continue
 			}
+			// Workaround for one weird event after log file InCloseWrite
+			if log_file != nil && event.Name == log_file.Name() && !skipedfirst {
+				skipedfirst = true
+				continue
+			}
+			skipedfirst = false
 		case err = <-watcher.Error:
 			errChan <- fmt.Errorf("inotify watch error: %w", err)
 			return
@@ -149,6 +156,7 @@ func csvLogReader(logDir string, rowChan chan<- []string, errChan chan<- error) 
 			row, err := csvReader.Read()
 			if errors.Is(err, io.EOF) {
 				log_file.Close()
+				runtime.GC()
 				break
 			}
 			if err != nil {
@@ -409,6 +417,8 @@ func (f *logFile) readAhead() {
 				}
 				f.blockChan <- bs[0:n:n]
 			}
+		case <-time.After(time.Second):
+			runtime.GC()
 		case err := <-f.watcher.Error:
 			f.err = err
 			return

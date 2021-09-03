@@ -13,4 +13,4 @@ before_script:
 build image:
   <<: *build_image
   variables:
-    VERSION: "v0.5.0"
+    VERSION: "v0.6.0"
