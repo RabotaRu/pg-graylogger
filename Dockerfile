@@ -23,4 +23,6 @@ LABEL maintainer="o.marin@rabota.ru"
 COPY --from=builder /pg_graylogger /bin/
 COPY --from=builder /bin/busybox /bin/
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+RUN ["/bin/busybox", "mkdir", "-p", "/sbin", "/usr/bin", "/usr/sbin"]
+RUN ["/bin/busybox", "--install", "-s"]
 ENTRYPOINT ["/bin/pg_graylogger"]
