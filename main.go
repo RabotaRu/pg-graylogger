@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/csv"
 	"errors"
 	"flag"
@@ -11,10 +10,12 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"os/signal"
 	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"gopkg.in/Graylog2/go-gelf.v2/gelf"
@@ -22,7 +23,6 @@ import (
 )
 
 const (
-	Version       = "v0.6.0"
 	bufSize       = 1024 * 1024
 	logTimeFormat = "2006-01-02 15:04:05.000 MST"
 	shortMsgLen   = 100
@@ -31,9 +31,10 @@ const (
 )
 
 var (
-	showVer, depersonalize                  bool
-	debug, logDir, graylogAddress, facility string
+	Version                                 = "dev"
+	graylogAddress, logDir, facility, debug string
 	cacheSize                               int
+	depersonalize, showVer                  bool
 	pgCsvLogFields                          = [...]string{
 		"log_time",
 		"user_name",
@@ -72,6 +73,7 @@ func main() {
 	flag.BoolVar(&depersonalize, "depers", false,
 		"Depersonalize. Replace sensible information (field values) from query texts")
 	flag.BoolVar(&showVer, "version", false, "Show version")
+
 	flag.Parse()
 
 	if showVer {
@@ -83,26 +85,35 @@ func main() {
 		go func() { log.Println(http.ListenAndServe(debug, nil)) }()
 	}
 
+	signalChan := make(chan os.Signal, 1)
+	signal.Notify(signalChan, syscall.SIGINT, syscall.SIGTERM)
+
 	preprocChan := make(chan []string)
 	graylogChan := make(chan map[string]interface{})
 	errChan := make(chan error)
 
 	go graylogWriter(graylogAddress, graylogChan, errChan)
 	go rowsPreproc(preprocChan, graylogChan, errChan)
-	go csvLogReader(logDir, preprocChan, errChan)
+	go csvLogReader(logDir, preprocChan, errChan, signalChan)
 
 	var ok bool
 	err, ok := <-errChan
 	if ok && err != nil {
 		log.Fatalln(err)
+	} else {
+		fmt.Println("")
 	}
 }
 
-func csvLogReader(logDir string, rowChan chan<- []string, errChan chan<- error) {
+func csvLogReader(logDir string, rowChan chan<- []string,
+	errChan chan<- error, signalChan <-chan os.Signal) {
 	defer close(rowChan)
 	var log_file *logFile
-	defer log_file.Close()
-	var skipedfirst bool
+	defer func() {
+		if log_file != nil {
+			log_file.Close()
+		}
+	}()
 	var csvReader *csv.Reader
 	var watcher *inotify.Watcher
 	watcher, err := inotify.NewWatcher()
@@ -117,27 +128,32 @@ func csvLogReader(logDir string, rowChan chan<- []string, errChan chan<- error) 
 			errChan <- fmt.Errorf("error adding %v path to inotify.Watcher: %w", logDir, err)
 			return
 		}
-		select {
-		case event = <-watcher.Event:
-			if !strings.HasSuffix(event.Name, ".csv") {
-				continue
-			}
-			// Workaround for one weird event after log file InCloseWrite
-			if log_file != nil && event.Name == log_file.Name() && !skipedfirst {
-				skipedfirst = true
-				continue
-			}
-			skipedfirst = false
-		case err = <-watcher.Error:
-			errChan <- fmt.Errorf("inotify watch error: %w", err)
-			return
-		}
 
+		for skip := 0; skip < 2; {
+			select {
+			case event = <-watcher.Event:
+				if !strings.HasSuffix(event.Name, ".csv") {
+					continue
+				}
+				// Workaround for one weird event after log file InCloseWrite
+				if log_file == nil || event.Name != log_file.Name() {
+					skip++
+				}
+				skip++
+			case err = <-watcher.Error:
+				errChan <- fmt.Errorf("inotify watch error: %w", err)
+				return
+			case <-signalChan:
+				return
+			}
+		}
 		log_file, err = OpenLogFile(event.Name, cacheSize)
 		if err != nil {
 			errChan <- fmt.Errorf("error open log file: %w", err)
 			return
 		}
+		// When log_file has just been creanted and before first csvReader init
+		// we move to end of first log file. But we dont want to scroll any of next log files.
 		if csvReader == nil {
 			if _, err = log_file.Seek(0, io.SeekEnd); err != nil {
 				errChan <- fmt.Errorf("error seek to end of log file: %w", err)
@@ -152,18 +168,24 @@ func csvLogReader(logDir string, rowChan chan<- []string, errChan chan<- error) 
 			return
 		}
 
-		for {
-			row, err := csvReader.Read()
-			if errors.Is(err, io.EOF) {
-				log_file.Close()
-				runtime.GC()
-				break
-			}
-			if err != nil {
-				errChan <- fmt.Errorf("error reading next row: %w", err)
+		for reading := true; reading; {
+			select {
+			case <-signalChan:
 				return
+			default:
+				row, err := csvReader.Read()
+				if errors.Is(err, io.EOF) {
+					log_file.Close()
+					runtime.GC()
+					reading = false
+					break
+				}
+				if err != nil {
+					errChan <- fmt.Errorf("error reading next row: %w", err)
+					return
+				}
+				rowChan <- row
 			}
-			rowChan <- row
 		}
 	}
 }
@@ -261,7 +283,7 @@ func graylogWriter(
 	log.Println("Begin expoting logs to graylog server:", graylogAddress)
 	gelfWriter, err := gelf.NewUDPWriter(graylogAddress)
 	if err != nil {
-		errChan <- fmt.Errorf("problem setting up UPDGelf: %w", err)
+		errChan <- fmt.Errorf("problem setting up UDPGelf: %w", err)
 		return
 	}
 	defer gelfWriter.Close()
@@ -285,21 +307,19 @@ func graylogWriter(
 			log.Println("timestamp is missing in a row")
 			continue
 		}
-		if msg, ok := rowMap["message"].(string); ok {
-			if len(msg) > shortMsgLen {
-				message.Short = msg[:shortMsgLen]
-				message.Full = msg
-			} else {
-				message.Short = msg
-				message.Full = ""
-			}
+		var msg string
+		var ok bool
+		if msg, ok = rowMap["statement"].(string); ok {
+		} else if msg, ok = rowMap["message"].(string); ok {
 			delete(rowMap, "message")
-		} else if statement, ok := rowMap["statement"].(string); ok {
-			if len(statement) > shortMsgLen {
-				message.Short = statement[:shortMsgLen]
-			} else {
-				message.Short = statement
-			}
+		} else {
+			msg = "empty"
+		}
+		if len(msg) > shortMsgLen {
+			message.Short = msg[:shortMsgLen]
+			message.Full = msg
+		} else {
+			message.Short = msg
 		}
 		message.Extra = rowMap
 		err = gelfWriter.WriteMessage(&message)
@@ -308,146 +328,5 @@ func graylogWriter(
 			return
 		}
 	}
-}
-
-type logFile struct {
-	// Blocking and ahead read caching io.Reader interface implementation
-	*os.File
-	watcher   *inotify.Watcher
-	blockChan chan []byte
-	err       error
-	tailBuf   []byte
-	cacheSize int
-}
-
-func (f *logFile) Seek(offset int64, whence int) (ret int64, err error) {
-	ret, err = f.File.Seek(offset, whence)
-	if err != nil {
-		return
-	}
-	if !(offset == 0 && whence == io.SeekCurrent) || ret != 0 {
-		ret, err = f.AlignToRow()
-	}
-	return
-}
-
-func (f *logFile) AlignToRow() (ret int64, err error) {
-	rowPrefix := []byte("\"\n")
-	var n, ri int
-	for {
-		buf := make([]byte, bufSize)
-		if n, err = f.File.Read(buf); errors.Is(err, io.EOF) {
-			time.Sleep(time.Second)
-			continue
-		} else if err != nil {
-			return ret, fmt.Errorf("error align to next row: %w", err)
-		}
-		for {
-			var i int
-			if i = bytes.Index(buf, rowPrefix); i == -1 {
-				break
-			} else if ri = i + len(rowPrefix); n-ri < len(logTimeFormat) {
-				_, err = f.File.Seek(int64(i-n), io.SeekCurrent)
-				if err != nil {
-					return
-				}
-				break
-			} else if _, err := time.Parse(
-				logTimeFormat,
-				string(buf[ri:ri+len(logTimeFormat)])); err != nil {
-				continue
-			}
-			return f.File.Seek(int64(ri-n), io.SeekCurrent)
-		}
-	}
-}
-
-func (f *logFile) Read(b []byte) (n int, err error) {
-	if f.blockChan == nil {
-		f.blockChan = make(chan []byte, f.cacheSize)
-		go f.readAhead()
-	}
-
-	if f.tailBuf == nil || len(f.tailBuf) == 0 {
-		var ok bool
-		f.tailBuf, ok = <-f.blockChan
-		if !ok {
-			f.File.Close()
-			f.watcher.Close()
-			return 0, f.err
-		}
-	}
-
-	switch n = copy(b, f.tailBuf); {
-	case n == len(f.tailBuf):
-		f.tailBuf = nil
-	case n == len(b):
-		f.tailBuf = f.tailBuf[n:]
-	}
-	return
-}
-
-func (f *logFile) readAhead() {
-	defer close(f.blockChan)
-	if err := f.watcher.AddWatch(f.File.Name(), inotify.InModify|inotify.InCloseWrite); err != nil {
-		f.err = err
-		return
-	}
-	defer func() {
-		if err := f.watcher.RemoveWatch(f.File.Name()); err != nil {
-			f.err = err
-			return
-		}
-	}()
-	for {
-		select {
-		case event := <-f.watcher.Event:
-			for {
-				bs := make([]byte, bufSize)
-				n, err := f.File.Read(bs)
-				if errors.Is(err, io.EOF) {
-					if event.Mask&inotify.InCloseWrite != 0 {
-						f.err = io.EOF
-						return
-					}
-					break
-				} else if err != nil {
-					f.err = err
-					return
-				}
-				f.blockChan <- bs[0:n:n]
-			}
-		case <-time.After(time.Second):
-			runtime.GC()
-		case err := <-f.watcher.Error:
-			f.err = err
-			return
-		}
-	}
-}
-
-func (f *logFile) Close() {
-	f.watcher.Close()
-	f.File.Close()
-}
-
-func OpenLogFile(name string, cacheSize int) (f *logFile, err error) {
-	var file *os.File
-	var w *inotify.Watcher
-	file, err = os.Open(name)
-	if err != nil {
-		return nil, err
-	}
-	w, err = inotify.NewWatcher()
-	if err != nil {
-		file.Close()
-		return nil, err
-	}
-	lf := &logFile{
-		File:      file,
-		cacheSize: cacheSize,
-		tailBuf:   make([]byte, 0, bufSize),
-		watcher:   w,
-	}
-	return lf, err
+	errChan <- nil
 }
