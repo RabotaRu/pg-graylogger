@@ -15,8 +15,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
-	"time"
 
 	"gopkg.in/Graylog2/go-gelf.v2/gelf"
 	"k8s.io/utils/inotify"
@@ -26,7 +26,6 @@ const (
 	bufSize       = 1024 * 1024
 	logTimeFormat = "2006-01-02 15:04:05.000 MST"
 	shortMsgLen   = 100
-	nanoSec       = 1000000000.0
 	maxStmtLen    = 7 * 1024
 )
 
@@ -35,6 +34,9 @@ var (
 	graylogAddress, logDir, facility, debug string
 	cacheSize                               int
 	depersonalize, showVer                  bool
+	statementsCache                         sync.Map
+	ppwg                                    sync.WaitGroup
+	onceStopping                            sync.Once
 	pgCsvLogFields                          = [...]string{
 		"log_time",
 		"user_name",
@@ -68,7 +70,8 @@ func main() {
 		"Address of graylog in form of server:port")
 	flag.StringVar(&logDir, "log-dir", "/var/log/postgresql",
 		"Path to postgresql log file in csv format")
-	flag.IntVar(&cacheSize, "cache-size", 10, "ReadAhead buffer cache size (default: 10)")
+	flag.IntVar(&cacheSize, "cache-size", 10, "ReadAhead buffer cache size")
+	procThreads := flag.Int("processing-threads", 1, "ReadAhead buffer cache size")
 	flag.StringVar(&facility, "facility", "", "Facility field for log messages")
 	flag.BoolVar(&depersonalize, "depers", false,
 		"Depersonalize. Replace sensible information (field values) from query texts")
@@ -81,6 +84,10 @@ func main() {
 		os.Exit(0)
 	}
 
+	if *procThreads <= 0 {
+		log.Fatalln("Number of  processing worker threads must be positive!")
+	}
+
 	if debug = os.Getenv("DEBUG"); debug != "" {
 		go func() { log.Println(http.ListenAndServe(debug, nil)) }()
 	}
@@ -88,12 +95,14 @@ func main() {
 	signalChan := make(chan os.Signal, 1)
 	signal.Notify(signalChan, syscall.SIGINT, syscall.SIGTERM)
 
-	preprocChan := make(chan []string)
+	preprocChan := make(chan []string, *procThreads)
 	graylogChan := make(chan map[string]interface{})
 	errChan := make(chan error)
 
 	go graylogWriter(graylogAddress, graylogChan, errChan)
-	go rowsPreproc(preprocChan, graylogChan, errChan)
+	for i := 0; i <= *procThreads; i++ {
+		go rowsPreproc(preprocChan, graylogChan, errChan)
+	}
 	go csvLogReader(logDir, preprocChan, errChan, signalChan)
 
 	var ok bool
@@ -193,9 +202,13 @@ func csvLogReader(logDir string, rowChan chan<- []string,
 func rowsPreproc(rowChan <-chan []string,
 	gelfChan chan<- map[string]interface{},
 	errChan chan<- error) {
-	defer close(gelfChan)
+	ppwg.Add(1)
+	defer func() {
+		ppwg.Done()
+		ppwg.Wait()
+		onceStopping.Do(func() { close(gelfChan) })
+	}()
 	var err error
-	statementsCache := make(map[interface{}]string, 1024)
 	reMsg := regexp.MustCompile("(?is)" +
 		`^(?:duration:\s(?P<duration>\d+\.\d{3})\sms\s*|)` +
 		`(?:(?:statement|execute .+?):\s*(?P<statement>.*?)\s*|)$`)
@@ -205,12 +218,6 @@ func rowsPreproc(rowChan <-chan []string,
 		rowMap := make(map[string]interface{}, 32)
 		for index, value := range row {
 			switch pgCsvLogFields[index] {
-			case "log_time":
-				rowMap["log_time"], err = time.Parse(logTimeFormat, value)
-				if err != nil {
-					errChan <- fmt.Errorf("coundn't parse log time: %w", err)
-					return
-				}
 			case "message":
 				if depersonalize {
 					value = reDepers.ReplaceAllString(value, "$1 ( DEPERSONALIZED )")
@@ -239,20 +246,18 @@ func rowsPreproc(rowChan <-chan []string,
 					case "BIND", "PARSE":
 						break
 					default:
-						if statement, ok := statementsCache[rowMap["session_id"]]; ok {
+						if statement, loaded := statementsCache.LoadAndDelete(rowMap["session_id"]); loaded {
 							rowMap["statement"] = statement
-							delete(statementsCache, rowMap["session_id"])
 						}
 					}
 				case matches[2] != "":
-					statementsCache[rowMap["session_id"]] = matches[2]
+					statementsCache.Store(rowMap["session_id"], matches[2])
 				}
 			case "error_severity":
 				switch value {
 				case "ERROR", "FATAL":
-					if statement, ok := statementsCache[rowMap["session_id"]]; ok {
+					if statement, loaded := statementsCache.LoadAndDelete(rowMap["session_id"]); loaded {
 						rowMap["statement"] = statement
-						delete(statementsCache, rowMap["session_id"])
 					}
 				default:
 					rowMap["error_serverity"] = value
@@ -300,13 +305,7 @@ func graylogWriter(
 			Extra:    nil,
 			// RawExtra: json.RawMessage,
 		}
-		if ts, ok := rowMap["log_time"].(time.Time); ok {
-			message.TimeUnix = float64(ts.Unix()) + (float64(ts.Nanosecond()) / nanoSec)
-			delete(rowMap, "log_time")
-		} else {
-			log.Println("timestamp is missing in a row")
-			continue
-		}
+
 		var msg string
 		var ok bool
 		if msg, ok = rowMap["statement"].(string); ok {
@@ -324,8 +323,15 @@ func graylogWriter(
 		message.Extra = rowMap
 		err = gelfWriter.WriteMessage(&message)
 		if err != nil {
-			errChan <- fmt.Errorf("error writing message (UDP GELF): %w", err)
-			return
+			switch err_msg := err.Error(); {
+			case strings.HasPrefix(err_msg, "msg too large"):
+				log.Printf(
+					"SKIPPED, could't send message from %v with session_id %v and session_linenum %v: %v \n",
+					rowMap["log_time"], rowMap["session_id"], rowMap["session_line_num"], err_msg)
+			default:
+				errChan <- fmt.Errorf("error writing message (UDP GELF): %w", err)
+				return
+			}
 		}
 	}
 	errChan <- nil

@@ -3,7 +3,7 @@ stages:
   - Build
 
 variables:
-  VERSION: "0.7.3"
+  VERSION: "0.8.0"
 
 before_script:
   - docker login -u gitlab-ci-token -p $CI_BUILD_TOKEN $CI_REGISTRY
