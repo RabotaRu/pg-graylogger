@@ -32,7 +32,8 @@ const (
 var (
 	Version                                 = "dev"
 	graylogAddress, logDir, facility, debug string
-	cacheSize                               int
+	cacheSize, compresionLevel              int
+	compressionType                         gelf.CompressType
 	depersonalize, showVer                  bool
 	statementsCache                         sync.Map
 	ppwg                                    sync.WaitGroup
@@ -70,18 +71,29 @@ func main() {
 		"Address of graylog in form of server:port")
 	flag.StringVar(&logDir, "log-dir", "/var/log/postgresql",
 		"Path to postgresql log file in csv format")
+	flag.IntVar(&compresionLevel, "compression-level", 5, "Compression level for gelf packets")
+	compType := flag.String("compressioin-type", "gzip", "Compression type (gzip, zlib or none)")
 	flag.IntVar(&cacheSize, "cache-size", 10, "ReadAhead buffer cache size")
-	procThreads := flag.Int("processing-threads", 1, "ReadAhead buffer cache size")
+	procThreads := flag.Int("processing-threads", 1, "Number of record-processing threads")
 	flag.StringVar(&facility, "facility", "", "Facility field for log messages")
 	flag.BoolVar(&depersonalize, "depers", false,
 		"Depersonalize. Replace sensible information (field values) from query texts")
 	flag.BoolVar(&showVer, "version", false, "Show version")
-
 	flag.Parse()
 
 	if showVer {
 		fmt.Println(Version)
 		os.Exit(0)
+	}
+	switch *compType {
+	case "gzip":
+		compressionType = gelf.CompressGzip
+	case "zlib":
+		compressionType = gelf.CompressZlib
+	case "none":
+		compressionType = gelf.CompressNone
+	default:
+		log.Fatalf("%v is not a valid value for -compression-type\n", *compType)
 	}
 
 	if *procThreads <= 0 {
@@ -96,16 +108,15 @@ func main() {
 	signal.Notify(signalChan, syscall.SIGINT, syscall.SIGTERM)
 
 	preprocChan := make(chan []string, *procThreads)
-	graylogChan := make(chan map[string]interface{})
+	graylogChan := make(chan map[string]interface{}, *procThreads)
 	errChan := make(chan error)
 
-	go graylogWriter(graylogAddress, graylogChan, errChan)
 	for i := 0; i <= *procThreads; i++ {
+		go graylogWriter(graylogAddress, graylogChan, errChan)
 		go rowsPreproc(preprocChan, graylogChan, errChan)
 	}
 	go csvLogReader(logDir, preprocChan, errChan, signalChan)
 
-	var ok bool
 	err, ok := <-errChan
 	if ok && err != nil {
 		log.Fatalln(err)
@@ -285,12 +296,14 @@ func graylogWriter(
 		errChan <- fmt.Errorf("problem getting hostname: %w", err)
 		return
 	}
-	log.Println("Begin expoting logs to graylog server:", graylogAddress)
+	log.Println("Ready for expoting logs to graylog server:", graylogAddress)
 	gelfWriter, err := gelf.NewUDPWriter(graylogAddress)
 	if err != nil {
 		errChan <- fmt.Errorf("problem setting up UDPGelf: %w", err)
 		return
 	}
+	gelfWriter.CompressionLevel = compresionLevel
+	gelfWriter.CompressionType = compressionType
 	defer gelfWriter.Close()
 
 	for rowMap := range rowMapChan {
@@ -321,6 +334,7 @@ func graylogWriter(
 			message.Short = msg
 		}
 		message.Extra = rowMap
+
 		err = gelfWriter.WriteMessage(&message)
 		if err != nil {
 			switch err_msg := err.Error(); {
