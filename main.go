@@ -32,8 +32,7 @@ const (
 var (
 	Version                                 = "dev"
 	graylogAddress, logDir, facility, debug string
-	cacheSize, compresionLevel              int
-	compressionType                         gelf.CompressType
+	cacheSize                               int
 	depersonalize, showVer                  bool
 	statementsCache                         sync.Map
 	ppwg                                    sync.WaitGroup
@@ -67,42 +66,60 @@ var (
 )
 
 func main() {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Fatalln(r)
+		}
+	}()
+
 	flag.StringVar(&graylogAddress, "graylog-address", "localhost:2345",
 		"Address of graylog in form of server:port")
 	flag.StringVar(&logDir, "log-dir", "/var/log/postgresql",
 		"Path to postgresql log file in csv format")
-	flag.IntVar(&compresionLevel, "compression-level", 5, "Compression level for gelf packets")
-	compType := flag.String("compressioin-type", "gzip", "Compression type (gzip, zlib or none)")
+	compresionLevel := flag.Int("compression-level", 5,
+		"Compression level for gelf packets")
+	compType := flag.String("compressioin-type", "gzip",
+		"Compression type (gzip, zlib or none)")
 	flag.IntVar(&cacheSize, "cache-size", 10, "ReadAhead buffer cache size")
 	procThreads := flag.Int("processing-threads", 1, "Number of record-processing threads")
 	flag.StringVar(&facility, "facility", "", "Facility field for log messages")
 	flag.BoolVar(&depersonalize, "depers", false,
 		"Depersonalize. Replace sensible information (field values) from query texts")
 	flag.BoolVar(&showVer, "version", false, "Show version")
+
 	flag.Parse()
 
 	if showVer {
 		fmt.Println(Version)
-		os.Exit(0)
-	}
-	switch *compType {
-	case "gzip":
-		compressionType = gelf.CompressGzip
-	case "zlib":
-		compressionType = gelf.CompressZlib
-	case "none":
-		compressionType = gelf.CompressNone
-	default:
-		log.Fatalf("%v is not a valid value for -compression-type\n", *compType)
+		return
 	}
 
 	if *procThreads <= 0 {
-		log.Fatalln("Number of  processing worker threads must be positive!")
+		panic("Number of  processing worker threads must be positive!")
 	}
 
 	if debug = os.Getenv("DEBUG"); debug != "" {
 		go func() { log.Println(http.ListenAndServe(debug, nil)) }()
 	}
+
+	gelfWriter, err := gelf.NewUDPWriter(graylogAddress)
+	if err != nil {
+		panic(fmt.Errorf("problem setting up UDPGelf: %w", err))
+	}
+	defer gelfWriter.Close()
+
+	switch *compType {
+	case "gzip":
+		gelfWriter.CompressionType = gelf.CompressGzip
+	case "zlib":
+		gelfWriter.CompressionType = gelf.CompressZlib
+	case "none":
+		gelfWriter.CompressionType = gelf.CompressNone
+	default:
+		panic(fmt.Sprintf("%v is not a valid value for -compression-type", *compType))
+	}
+	gelfWriter.CompressionLevel = *compresionLevel
+	log.Println("Ready for expoting logs to graylog server:", graylogAddress)
 
 	signalChan := make(chan os.Signal, 1)
 	signal.Notify(signalChan, syscall.SIGINT, syscall.SIGTERM)
@@ -112,14 +129,14 @@ func main() {
 	errChan := make(chan error)
 
 	for i := 0; i <= *procThreads; i++ {
-		go graylogWriter(graylogAddress, graylogChan, errChan)
+		go graylogWriter(gelfWriter, graylogChan, errChan)
 		go rowsPreproc(preprocChan, graylogChan, errChan)
 	}
 	go csvLogReader(logDir, preprocChan, errChan, signalChan)
 
 	err, ok := <-errChan
 	if ok && err != nil {
-		log.Fatalln(err)
+		panic(err)
 	} else {
 		fmt.Println("")
 	}
@@ -288,7 +305,7 @@ func rowsPreproc(rowChan <-chan []string,
 }
 
 func graylogWriter(
-	graylogAddress string,
+	gelfWriter *gelf.UDPWriter,
 	rowMapChan <-chan map[string]interface{},
 	errChan chan<- error) {
 	hostname, err := os.Hostname()
@@ -296,15 +313,6 @@ func graylogWriter(
 		errChan <- fmt.Errorf("problem getting hostname: %w", err)
 		return
 	}
-	log.Println("Ready for expoting logs to graylog server:", graylogAddress)
-	gelfWriter, err := gelf.NewUDPWriter(graylogAddress)
-	if err != nil {
-		errChan <- fmt.Errorf("problem setting up UDPGelf: %w", err)
-		return
-	}
-	gelfWriter.CompressionLevel = compresionLevel
-	gelfWriter.CompressionType = compressionType
-	defer gelfWriter.Close()
 
 	for rowMap := range rowMapChan {
 		message := gelf.Message{
