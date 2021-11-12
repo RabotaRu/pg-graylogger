@@ -12,8 +12,7 @@ WORKDIR pg_graylogger
 # Copy src code from the host and compile it
 COPY go.* *.go ./
 RUN go mod download
-RUN go build -a -trimpath -ldflags "-X main.Version=$VERSION" -o /pg_graylogger
-RUN strip /pg_graylogger
+RUN go build -a -trimpath -ldflags "-X main.Version=$VERSION -w" -o /pg_graylogger
 
 ###
 FROM scratch

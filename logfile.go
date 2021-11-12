@@ -64,7 +64,7 @@ func (f *logFile) AlignToRow() (ret int64, err error) {
 	}
 }
 
-func (f *logFile) Read(b []byte) (n int, err error) {
+func (f *logFile) Read(buf []byte) (n int, err error) {
 	if f.blockChan == nil {
 		f.blockChan = make(chan []byte, f.cacheSize)
 		go f.readAhead()
@@ -80,10 +80,10 @@ func (f *logFile) Read(b []byte) (n int, err error) {
 		}
 	}
 
-	switch n = copy(b, f.tailBuf); {
+	switch n = copy(buf, f.tailBuf); {
 	case n == len(f.tailBuf):
 		f.tailBuf = nil
-	case n == len(b):
+	case n == len(buf):
 		f.tailBuf = f.tailBuf[n:]
 	}
 	return
@@ -105,8 +105,8 @@ func (f *logFile) readAhead() {
 		select {
 		case event := <-f.watcher.Event:
 			for {
-				bs := make([]byte, bufSize)
-				n, err := f.File.Read(bs)
+				buf := make([]byte, bufSize)
+				num, err := f.File.Read(buf)
 				if errors.Is(err, io.EOF) {
 					if event.Mask&inotify.InCloseWrite != 0 {
 						f.err = io.EOF
@@ -117,7 +117,7 @@ func (f *logFile) readAhead() {
 					f.err = err
 					return
 				}
-				f.blockChan <- bs[0:n:n]
+				f.blockChan <- buf[0:num:num]
 			}
 		case <-time.After(time.Second):
 			runtime.GC()
@@ -145,11 +145,11 @@ func OpenLogFile(name string, cacheSize int) (f *logFile, err error) {
 		file.Close()
 		return nil, err
 	}
-	lf := &logFile{
+	log_file := &logFile{
 		File:      file,
 		cacheSize: cacheSize,
 		tailBuf:   make([]byte, 0, bufSize),
 		watcher:   w,
 	}
-	return lf, err
+	return log_file, err
 }
