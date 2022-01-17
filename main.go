@@ -17,7 +17,6 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 
 	"gopkg.in/Graylog2/go-gelf.v2/gelf"
 	"k8s.io/utils/inotify"
@@ -133,16 +132,16 @@ func main() {
 	errChan := make(chan error)
 
 	for i := 0; i <= *gelfStreams; i++ {
+		gwwg.Add(1)
 		go graylogWriter(gelfWriter, graylogChan, errChan)
 	}
 	for i := 0; i <= *procThreads; i++ {
+		ppwg.Add(1)
 		go rowsPreproc(preprocChan, graylogChan, errChan)
 	}
 	go csvLogReader(logDir, preprocChan, errChan, signalChan)
 
 	go func() {
-		// Workaround for goroutines not hurrying to add themselves to WaitGroup
-		time.Sleep(time.Millisecond)
 		ppwg.Wait()
 		close(graylogChan)
 		gwwg.Wait()
@@ -245,7 +244,6 @@ func csvLogReader(logDir string, rowChan chan<- []string,
 func rowsPreproc(rowChan <-chan []string,
 	gelfChan chan<- map[string]interface{},
 	errChan chan<- error) {
-	ppwg.Add(1)
 	defer ppwg.Done()
 
 	var err error
@@ -317,7 +315,6 @@ func graylogWriter(
 	gelfWriter *gelf.UDPWriter,
 	rowMapChan <-chan map[string]interface{},
 	errChan chan<- error) {
-	gwwg.Add(1)
 	defer gwwg.Done()
 
 	hostname, err := os.Hostname()
