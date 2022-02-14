@@ -1,5 +1,5 @@
 ARG GOLANG_VERSION=1.16
-ARG VERSION=0.7.2
+ARG VERSION=0.7.3
 
 FROM golang:${GOLANG_VERSION} AS builder
 ARG VERSION
@@ -17,6 +17,5 @@ RUN go build -a -trimpath -ldflags "-X main.Version=$VERSION -w" -o /pg_graylogg
 ###
 FROM scratch
 LABEL maintainer="o.marin@rabota.ru"
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=builder /pg_graylogger /bin/
 ENTRYPOINT ["/bin/pg_graylogger"]

@@ -28,6 +28,7 @@ linters:
     - scopelint
     - tagliatelle
     - testpackage
+    - varnamelen
     - wrapcheck
     - wsl
 
