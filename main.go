@@ -60,6 +60,8 @@ var (
 		"location",
 		"application_name",
 		"backend_type",
+		"leader_pid",
+		"query_id",
 	}
 )
 
@@ -156,6 +158,9 @@ func main() {
 	}
 }
 
+// csvLogReader reads postgres log files in csv format.
+// It reads log until ModifyClose event, ignoring intermediate io.EOFs.
+// First opened log it reads from end of file, while others reads from beginning.
 func csvLogReader(logDir string, rowChan chan<- []string,
 	errChan chan<- error, signalChan <-chan os.Signal) {
 	defer close(rowChan)
@@ -241,6 +246,7 @@ func csvLogReader(logDir string, rowChan chan<- []string,
 	}
 }
 
+// rowsPreproc procceses raw slices of strings from csvLogReader and sends them to graylogWriter
 func rowsPreproc(rowChan <-chan []string,
 	gelfChan chan<- map[string]interface{},
 	errChan chan<- error) {
@@ -311,6 +317,7 @@ func rowsPreproc(rowChan <-chan []string,
 	}
 }
 
+// graylogWriter sends preproccesed log messages to graylog server with UDPGelf
 func graylogWriter(
 	gelfWriter *gelf.UDPWriter,
 	rowMapChan <-chan map[string]interface{},

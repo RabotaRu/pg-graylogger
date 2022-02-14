@@ -12,8 +12,8 @@ import (
 	"k8s.io/utils/inotify"
 )
 
+// logFile is blocking and ahead read caching io.Reader interface implementation
 type logFile struct {
-	// Blocking and ahead read caching io.Reader interface implementation
 	*os.File
 	watcher   *inotify.Watcher
 	blockChan chan []byte
@@ -22,6 +22,7 @@ type logFile struct {
 	cacheSize int
 }
 
+// Seek implements io.Reader interface, it seeks and alignes to row
 func (f *logFile) Seek(offset int64, whence int) (ret int64, err error) {
 	ret, err = f.File.Seek(offset, whence)
 	if err != nil {
@@ -33,8 +34,8 @@ func (f *logFile) Seek(offset int64, whence int) (ret int64, err error) {
 	return
 }
 
+// AlignToRow seeks for new line beginning with timestamp. It ignores io.EOF errors
 func (f *logFile) AlignToRow() (ret int64, err error) {
-	rowPrefix := []byte("\"\n")
 	var n, ri int
 	for {
 		buf := make([]byte, bufSize)
@@ -45,10 +46,11 @@ func (f *logFile) AlignToRow() (ret int64, err error) {
 			return ret, fmt.Errorf("error align to next row: %w", err)
 		}
 		for {
+			rowPrefix := []byte("\n" + time.Now().Format(logTimeFormat[:16]))
 			var i int
 			if i = bytes.Index(buf, rowPrefix); i == -1 {
 				break
-			} else if ri = i + len(rowPrefix); n-ri < len(logTimeFormat) {
+			} else if ri = i + 1; n-ri < len(logTimeFormat) {
 				_, err = f.File.Seek(int64(i-n), io.SeekCurrent)
 				if err != nil {
 					return
@@ -64,6 +66,7 @@ func (f *logFile) AlignToRow() (ret int64, err error) {
 	}
 }
 
+// Read implements io.Reader interface. It ignores io.EOF until ModifyClose event.
 func (f *logFile) Read(buf []byte) (n int, err error) {
 	if f.blockChan == nil {
 		f.blockChan = make(chan []byte, f.cacheSize)
@@ -89,6 +92,7 @@ func (f *logFile) Read(buf []byte) (n int, err error) {
 	return
 }
 
+// readAhead is used to buffer ahead and reduce read operations with storage access
 func (f *logFile) readAhead() {
 	defer close(f.blockChan)
 	if err := f.watcher.AddWatch(f.File.Name(), inotify.InModify|inotify.InCloseWrite); err != nil {
@@ -128,11 +132,13 @@ func (f *logFile) readAhead() {
 	}
 }
 
+// Close implements io.Reader interface
 func (f *logFile) Close() {
 	f.watcher.Close()
 	f.File.Close()
 }
 
+// OpenLogFile creates new instance of logFile
 func OpenLogFile(name string, cacheSize int) (f *logFile, err error) {
 	var file *os.File
 	var w *inotify.Watcher
