@@ -1,0 +1,126 @@
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - env:
+      - CGO_ENABLED=0
+      - GO386=softfloat
+    goos:
+      - linux
+      - windows
+      - darwin
+    ignore:
+      - goos: darwin
+        goarch: "386"
+    main: ./cmd/helmwave
+    ldflags:
+      - -s -w -X github.com/RabotaRu/pg-graylogger/main.Version={{.Version}}
+
+archives:
+  - format_overrides:
+      - goos: windows
+        format: zip
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  name_template: "{{ .Tag }}-next"
+
+release:
+  name_template: "v{{.Version}}"
+  #  draft: true
+  prerelease: auto
+
+changelog:
+  skip: false
+  use: github
+  sort: asc
+
+  groups:
+    - title: "Linter"
+      regexp: "^.*linter.*$"
+      order: 0
+    - title: "Tests"
+      regexp: "^.*tests?.*$"
+      order: 1
+    - title: "Documentation"
+      regexp: "^.*(documentation|docs?).*$"
+      order: 2
+    - title: "Other"
+      order: 999
+
+  filters:
+    exclude:
+      - "^WIP:"
+      - Merge pull request
+      - Merge branch
+      - go mod tidy
+      - typo
+
+dockers:
+  - dockerfile: Dockerfile
+    image_templates:
+      - "ghcr.io/helmwave/helmwave:{{ .Version }}-scratch"
+      - "ghcr.io/helmwave/helmwave:scratch"
+
+      - "diamon/helmwave:{{ .Version }}-scratch"
+      - "diamon/helmwave:scratch"
+    build_flag_templates:
+      - "--pull"
+      - "--label=org.opencontainers.image.created={{.Date}}"
+      - "--label=org.opencontainers.image.title={{.ProjectName}}"
+      - "--label=org.opencontainers.image.revision={{.FullCommit}}"
+      - "--label=org.opencontainers.image.version={{.Version}}"
+      - "--label=org.opencontainers.image.licenses=MIT"
+      - "--label=org.opencontainers.image.source=https://github.com/helmwave/helmwave"
+      - "--label=org.opencontainers.image.url=https://github.com/helmwave/helmwave/pkgs/container/helmwave"
+      - "--label=org.opencontainers.image.documentation=https://helmwave.github.io/docs/"
+
+      - "--platform=linux/amd64"
+      - "--target=scratch-goreleaser"
+    goos: linux
+    goarch: amd64
+    use: buildx
+  - dockerfile: Dockerfile
+    image_templates:
+      - "ghcr.io/helmwave/helmwave:{{ .Version }}"
+      - "ghcr.io/helmwave/helmwave:latest"
+
+      - "diamon/helmwave:{{ .Version }}"
+      - "diamon/helmwave:latest"
+    build_flag_templates:
+      - "--pull"
+      - "--label=org.opencontainers.image.created={{.Date}}"
+      - "--label=org.opencontainers.image.title={{.ProjectName}}"
+      - "--label=org.opencontainers.image.revision={{.FullCommit}}"
+      - "--label=org.opencontainers.image.version={{.Version}}"
+      - "--label=org.opencontainers.image.licenses=MIT"
+      - "--label=org.opencontainers.image.source=https://github.com/helmwave/helmwave"
+      - "--label=org.opencontainers.image.url=https://github.com/helmwave/helmwave/pkgs/container/helmwave"
+      - "--label=org.opencontainers.image.documentation=https://helmwave.github.io/docs/"
+
+      - "--platform=linux/amd64"
+      - "--target=goreleaser"
+    goos: linux
+    goarch: amd64
+    use: buildx
+
+brews:
+  - tap:
+      owner: RabotaRu
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    description: "HelmWave is like docker-compose for helm"
+    license: "MIT"
+    folder: formula
+    skip_upload: auto
+
+milestones:
+  - repo:
+      owner: RabotaRu
+      name: pg-graylogger
+    close: true
+    fail_on_error: false
+    name_template: "{{.Tag}}"
