@@ -5,22 +5,10 @@ before:
 builds:
   - env:
       - CGO_ENABLED=0
-      - GO386=softfloat
     goos:
       - linux
-      - windows
-      - darwin
-    ignore:
-      - goos: darwin
-        goarch: "386"
-    main: ./cmd/helmwave
     ldflags:
-      - -s -w -X github.com/RabotaRu/pg-graylogger/main.Version={{.Version}}
-
-archives:
-  - format_overrides:
-      - goos: windows
-        format: zip
+      - -s -w -X main.Version={{.Version}}
 
 checksum:
   name_template: "checksums.txt"
@@ -62,11 +50,11 @@ changelog:
 dockers:
   - dockerfile: Dockerfile
     image_templates:
-      - "ghcr.io/helmwave/helmwave:{{ .Version }}-scratch"
-      - "ghcr.io/helmwave/helmwave:scratch"
+      - "ghcr.io/rabotaru/pg-graylogger:{{ .Version }}"
+      - "ghcr.io/rabotaru/pg-graylogger:latest"
 
-      - "diamon/helmwave:{{ .Version }}-scratch"
-      - "diamon/helmwave:scratch"
+      - "rabotaru/pg-graylogger:{{ .Version }}"
+      - "rabotaru/pg-graylogger:latest"
     build_flag_templates:
       - "--pull"
       - "--label=org.opencontainers.image.created={{.Date}}"
@@ -74,52 +62,27 @@ dockers:
       - "--label=org.opencontainers.image.revision={{.FullCommit}}"
       - "--label=org.opencontainers.image.version={{.Version}}"
       - "--label=org.opencontainers.image.licenses=MIT"
-      - "--label=org.opencontainers.image.source=https://github.com/helmwave/helmwave"
-      - "--label=org.opencontainers.image.url=https://github.com/helmwave/helmwave/pkgs/container/helmwave"
-      - "--label=org.opencontainers.image.documentation=https://helmwave.github.io/docs/"
+      - "--label=org.opencontainers.image.source=https://github.com/rabotaru/pg-graylogger"
+      - "--label=org.opencontainers.image.url=https://github.com/rabotaru/pg-graylogger/pkgs/container/pg-graylogger"
 
       - "--platform=linux/amd64"
-      - "--target=scratch-goreleaser"
-    goos: linux
-    goarch: amd64
-    use: buildx
-  - dockerfile: Dockerfile
-    image_templates:
-      - "ghcr.io/helmwave/helmwave:{{ .Version }}"
-      - "ghcr.io/helmwave/helmwave:latest"
-
-      - "diamon/helmwave:{{ .Version }}"
-      - "diamon/helmwave:latest"
-    build_flag_templates:
-      - "--pull"
-      - "--label=org.opencontainers.image.created={{.Date}}"
-      - "--label=org.opencontainers.image.title={{.ProjectName}}"
-      - "--label=org.opencontainers.image.revision={{.FullCommit}}"
-      - "--label=org.opencontainers.image.version={{.Version}}"
-      - "--label=org.opencontainers.image.licenses=MIT"
-      - "--label=org.opencontainers.image.source=https://github.com/helmwave/helmwave"
-      - "--label=org.opencontainers.image.url=https://github.com/helmwave/helmwave/pkgs/container/helmwave"
-      - "--label=org.opencontainers.image.documentation=https://helmwave.github.io/docs/"
-
-      - "--platform=linux/amd64"
-      - "--target=goreleaser"
     goos: linux
     goarch: amd64
     use: buildx
 
 brews:
   - tap:
-      owner: RabotaRu
+      owner: rabotaru
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
-    description: "HelmWave is like docker-compose for helm"
+    description: "Pg-graylogger is a small service for realtime postgresql server csvlog export to graylog server"
     license: "MIT"
     folder: formula
     skip_upload: auto
 
 milestones:
   - repo:
-      owner: RabotaRu
+      owner: rabotaru
       name: pg-graylogger
     close: true
     fail_on_error: false
