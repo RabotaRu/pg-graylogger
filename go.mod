@@ -1,4 +1,4 @@
-module git.rabota.space/infrastructure/pg_graylogger
+module github.com/RabotaRu/pg-graylogger
 
 go 1.16
 

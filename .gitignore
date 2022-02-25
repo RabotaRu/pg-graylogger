@@ -1,4 +1,5 @@
 .idea/
+.project*
 
 main
 pg_graylogger
