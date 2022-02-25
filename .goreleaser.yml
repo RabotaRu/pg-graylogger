@@ -70,16 +70,6 @@ dockers:
     goarch: amd64
     use: buildx
 
-brews:
-  - tap:
-      owner: rabotaru
-      name: homebrew-tap
-      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
-    description: "Pg-graylogger is a small service for realtime postgresql server csvlog export to graylog server"
-    license: "MIT"
-    folder: formula
-    skip_upload: auto
-
 milestones:
   - repo:
       owner: rabotaru
