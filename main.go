@@ -63,7 +63,60 @@ var (
 		"leader_pid",
 		"query_id",
 	}
+	reMsg = regexp.MustCompile("(?is)" +
+		`^(?:duration:\s(?P<duration>\d+\.\d{3})\sms\s*|)` +
+		`(?:(?:statement|execute .+?):\s*(?P<statement>.*?)\s*|)$`)
+	reValues = regexp.MustCompile(`(?i)\s+(VALUES|IN)\s+\(`)
+	reSubReq = regexp.MustCompile(`(?i)^\s*(INSERT|SELECT|UPDATE)\s+`)
 )
+
+func findClosingBracket(s *string, p int) (end, count int) {
+	open_brackets := 1
+	close_brackets := 0
+	subtext := false
+	for i, c := range (*s)[p:] {
+		switch c {
+		case '\'':
+			subtext = !subtext
+		case ')':
+			if !subtext {
+				close_brackets++
+				if close_brackets == open_brackets {
+					return p + i, count + 1
+				}
+			}
+		case '(':
+			if !subtext {
+				open_brackets++
+			}
+		case ',':
+			if !subtext {
+				count++
+			}
+		}
+	}
+	return 0, 0
+}
+
+func DepersSQL(sql *string) (err error) {
+	var pp int
+	var depsql string
+	found := reValues.FindAllStringIndex((*sql), -1)
+	for _, p := range found {
+		if reSubReq.MatchString((*sql)[p[1]:]) {
+			continue
+		}
+		if ppp, count := findClosingBracket(sql, p[1]); ppp != 0 && count != 0 {
+			depsql += (*sql)[pp:p[1]] + fmt.Sprintf("DEPESONALIZED %v VALUES", count)
+			pp = ppp
+		} else {
+			return fmt.Errorf("error find end of list of values in sql query, pos: %v", p[1])
+		}
+	}
+	depsql += (*sql)[pp:]
+	(*sql) = depsql
+	return err
+}
 
 func main() {
 	defer func() {
@@ -253,11 +306,6 @@ func rowsPreproc(rowChan <-chan []string,
 	defer ppwg.Done()
 
 	var err error
-	reMsg := regexp.MustCompile("(?is)" +
-		`^(?:duration:\s(?P<duration>\d+\.\d{3})\sms\s*|)` +
-		`(?:(?:statement|execute .+?):\s*(?P<statement>.*?)\s*|)$`)
-	reDepers := regexp.MustCompile(`(?si)\s+(VALUES|IN)\s+((|,)\(.+?\))+\s*`) //nolint: gocritic
-	replaceString := " $1 (DEPERSONALIZED) "
 
 	for row := range rowChan {
 		rowMap := make(map[string]interface{}, 32)
@@ -265,7 +313,9 @@ func rowsPreproc(rowChan <-chan []string,
 			switch pgCsvLogFields[index] {
 			case "message":
 				if depersonalize {
-					value = reDepers.ReplaceAllString(value, replaceString)
+					if err := DepersSQL(&value); err != nil {
+						log.Println(err)
+					}
 				}
 				switch matches := reMsg.FindStringSubmatch(value); {
 				case len(matches) == 0 || matches[0] == "":
@@ -305,7 +355,9 @@ func rowsPreproc(rowChan <-chan []string,
 				}
 			case "query":
 				if depersonalize {
-					rowMap["query"] = reDepers.ReplaceAllString(value, replaceString)
+					if err := DepersSQL(&value); err != nil {
+						log.Println(err)
+					}
 				} else {
 					rowMap["query"] = value
 				}
