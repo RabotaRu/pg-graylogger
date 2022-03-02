@@ -1,8 +1,9 @@
+*~
 .idea/
 .project*
-
+dist/
 main
-pg_graylogger
+pg*graylogger
 
 # General
 .DS_Store
