@@ -53,8 +53,6 @@ dockers:
       - "ghcr.io/rabotaru/pg-graylogger:{{ .Version }}"
       - "ghcr.io/rabotaru/pg-graylogger:latest"
 
-      - "rabotaru/pg-graylogger:{{ .Version }}"
-      - "rabotaru/pg-graylogger:latest"
     build_flag_templates:
       - "--pull"
       - "--label=org.opencontainers.image.created={{.Date}}"
