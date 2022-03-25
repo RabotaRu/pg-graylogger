@@ -14,7 +14,7 @@ checksum:
   name_template: "checksums.txt"
 
 snapshot:
-  name_template: "{{ .Tag }}-next"
+  name_template: "{{ .Tag }}-dev"
 
 release:
   name_template: "v{{.Version}}"
@@ -48,7 +48,7 @@ changelog:
       - typo
 
 dockers:
-  - dockerfile: Dockerfile
+  - dockerfile: GoReleaser.Dockerfile
     image_templates:
       - "ghcr.io/rabotaru/pg-graylogger:{{ .Version }}"
       - "ghcr.io/rabotaru/pg-graylogger:latest"
