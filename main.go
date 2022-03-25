@@ -66,7 +66,7 @@ var (
 	reMsg = regexp.MustCompile("(?is)" +
 		`^(?:duration:\s(?P<duration>\d+\.\d{3})\sms\s*|)` +
 		`(?:(?:statement|execute .+?):\s*(?P<statement>.*?)\s*|)$`)
-	reValues = regexp.MustCompile(`(?si)\s+(VALUES|IN)\s+\(`)
+	reValues = regexp.MustCompile(`(?si)\s+(VALUES|IN|=)\s+\(`)
 	reSubReq = regexp.MustCompile(`(?si)^\s*(INSERT|SELECT|UPDATE)\s+`)
 )
 
@@ -81,43 +81,48 @@ func CleanQuery(q *string) {
 		} else {
 			break
 		}
-		var inum, vnum, close_brackets int
-		open_brackets := 1
-		subtext := false
-		if s := reSubReq.FindString(query[pos:]); s != "" {
-			ppos += len(s)
+		if i := reSubReq.FindStringIndex(query[pos:]); i != nil {
+			ppos = pos+i[1]
 			continue
 		}
+		var inum, closed_brackets, temp_pos int
+		var subtext bool
+		opened_brackets := 1
 		depsql += query[ppos:pos]
-	findBlock:
-		for i, c := range query[pos:] {
+		findBlock: for i, c := range query[pos:] {
+			if subtext && c != '\'' {
+				continue
+			}
 			switch c {
 			case '\'':
 				subtext = !subtext
 			case ',':
-				if !subtext {
-					inum++
-				}
+				inum++
+			case ' ', '\t', '\f', '\n', '\r':
 			case '(':
-				if !subtext {
-					open_brackets++
-					vnum++
-				}
+				opened_brackets++
 			case ')':
-				if !subtext {
-					close_brackets++
-					if close_brackets == open_brackets {
-						inum++
-						if vnum > 0 {
-							depsql += fmt.Sprintf("/* HIDDEN %v VALUES */", vnum)
-						} else {
-							depsql += fmt.Sprintf("/* HIDDEN %v ITEMS */", inum)
-						}
-						ppos = pos + i
-						break findBlock
-					}
+				if closed_brackets == opened_brackets {
+					break findBlock
+				}
+				closed_brackets++
+				if closed_brackets == opened_brackets {
+					inum++
+					temp_pos = pos + i
+				}
+			default:
+				if closed_brackets == opened_brackets {
+					break findBlock
 				}
 			}
+		}
+		if temp_pos != 0 {
+			if closed_brackets > 0 {
+				depsql += fmt.Sprintf("/* HIDDEN %v VALUES %v symbols */", closed_brackets, temp_pos - ppos)
+			} else {
+				depsql += fmt.Sprintf("/* HIDDEN %v ITEMS %v symbols */", inum, temp_pos - ppos)
+			}
+			ppos = temp_pos
 		}
 	}
 	depsql += query[ppos:]
@@ -419,9 +424,14 @@ func graylogWriter(
 		if err != nil {
 			switch err_msg := err.Error(); {
 			case strings.HasPrefix(err_msg, "msg too large"):
+				var ss, qs int
+				if q, ok := rowMap["query"]; ok {
+					qs = len(q.(string))
+				}
+				ss = len(rowMap["statement"].(string))
 				log.Printf(
-					"SKIPPED, could't send message from %v with session_id %v and session_linenum %v: %v \n",
-					rowMap["log_time"], rowMap["session_id"], rowMap["session_line_num"], err_msg)
+					"SKIPPED, could't send message from %v with session_id %v and session_linenum %v: %v, %v %v \n",
+					rowMap["log_time"], rowMap["session_id"], rowMap["session_line_num"], err_msg, ss, qs)
 			default:
 				errChan <- fmt.Errorf("error writing message (UDP GELF): %w", err)
 				return
