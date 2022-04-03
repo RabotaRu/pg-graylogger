@@ -66,7 +66,7 @@ var (
 	reMsg = regexp.MustCompile("(?is)" +
 		`^(?:duration:\s(?P<duration>\d+\.\d{3})\sms\s*|)` +
 		`(?:(?:statement|execute .+?):\s*(?P<statement>.*?)\s*|)$`)
-	reValues = regexp.MustCompile(`(?si)\s+(VALUES|IN|=)\s+\(`)
+	reValues = regexp.MustCompile(`(?si)\s+(VALUES|IN|\)\s*=)\s*\(`)
 	reSubReq = regexp.MustCompile(`(?si)^\s*(INSERT|SELECT|UPDATE)\s+`)
 )
 

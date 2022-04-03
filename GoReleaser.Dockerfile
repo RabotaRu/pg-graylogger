@@ -1,3 +1,3 @@
 FROM scratch
-COPY pg-graylogger /bin/pg-graylogger
-ENTRYPOINT ['/bin/pg-graylogger']
+COPY pg-graylogger /bin/
+ENTRYPOINT ["/bin/pg-graylogger"]
