@@ -11,9 +11,10 @@ WORKDIR pg_graylogger
 
 # Copy src code from the host and compile it
 COPY go.* *.go ./
+COPY logfile/ ./logfile/
 RUN set -ex && \
     ls -l && \
-    go mod download && \
+    go mod tidy && \
     go build -a -trimpath -ldflags "-X main.Version=$VERSION -w" -o /pg_graylogger
 
 ###
