@@ -18,6 +18,7 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/RabotaRu/pg-graylogger/logfile"
 	"gopkg.in/Graylog2/go-gelf.v2/gelf"
 	"k8s.io/utils/inotify"
 )
@@ -25,6 +26,7 @@ import (
 const (
 	bufSize       = 1024 * 1024
 	logTimeFormat = "2006-01-02 15:04:05.000 MST"
+	secRndPos     = 16
 	shortMsgLen   = 100
 )
 
@@ -82,14 +84,15 @@ func CleanQuery(q *string) {
 			break
 		}
 		if i := reSubReq.FindStringIndex(query[pos:]); i != nil {
-			ppos = pos+i[1]
+			ppos = pos + i[1]
 			continue
 		}
 		var inum, closed_brackets, temp_pos int
 		var subtext bool
 		opened_brackets := 1
 		depsql += query[ppos:pos]
-		findBlock: for i, c := range query[pos:] {
+	findBlock:
+		for i, c := range query[pos:] {
 			if subtext && c != '\'' {
 				continue
 			}
@@ -118,9 +121,9 @@ func CleanQuery(q *string) {
 		}
 		if temp_pos != 0 {
 			if closed_brackets > 0 {
-				depsql += fmt.Sprintf("/* HIDDEN %v VALUES %v symbols */", closed_brackets, temp_pos - ppos)
+				depsql += fmt.Sprintf("/* HIDDEN %v VALUES %v symbols */", closed_brackets, temp_pos-ppos)
 			} else {
-				depsql += fmt.Sprintf("/* HIDDEN %v ITEMS %v symbols */", inum, temp_pos - ppos)
+				depsql += fmt.Sprintf("/* HIDDEN %v ITEMS %v symbols */", inum, temp_pos-ppos)
 			}
 			ppos = temp_pos
 		}
@@ -228,7 +231,7 @@ func main() {
 func csvLogReader(logDir string, rowChan chan<- []string,
 	errChan chan<- error, signalChan <-chan os.Signal) {
 	defer close(rowChan)
-	var log_file *logFile
+	var log_file *logfile.LogFile
 	defer func() {
 		if log_file != nil {
 			log_file.Close()
@@ -267,7 +270,7 @@ func csvLogReader(logDir string, rowChan chan<- []string,
 				return
 			}
 		}
-		log_file, err = OpenLogFile(event.Name, cacheSize)
+		log_file, err = logfile.OpenLogFile(event.Name, logTimeFormat, secRndPos, bufSize, cacheSize)
 		if err != nil {
 			errChan <- fmt.Errorf("error open log file: %w", err)
 			return
@@ -425,10 +428,12 @@ func graylogWriter(
 			switch err_msg := err.Error(); {
 			case strings.HasPrefix(err_msg, "msg too large"):
 				var ss, qs int
-				if q, ok := rowMap["query"]; ok {
-					qs = len(q.(string))
+				if q, ok := rowMap["query"].(string); ok {
+					qs = len(q)
 				}
-				ss = len(rowMap["statement"].(string))
+				if s, ok := rowMap["statement"].(string); ok {
+					ss = len(s)
+				}
 				log.Printf(
 					"SKIPPED, could't send message from %v with session_id %v and session_linenum %v: %v, %v %v \n",
 					rowMap["log_time"], rowMap["session_id"], rowMap["session_line_num"], err_msg, ss, qs)

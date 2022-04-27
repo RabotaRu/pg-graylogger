@@ -1,4 +1,4 @@
-package main
+package logfile
 
 import (
 	"bytes"
@@ -13,17 +13,20 @@ import (
 )
 
 // logFile is blocking and ahead read caching io.Reader interface implementation
-type logFile struct {
+type LogFile struct {
 	*os.File
 	watcher   *inotify.Watcher
 	blockChan chan []byte
 	err       error
+	logTsFmt  string
 	tailBuf   []byte
+	secRndPos int
+	bufSize   int
 	cacheSize int
 }
 
 // Seek implements io.Reader interface, it seeks and alignes to row
-func (f *logFile) Seek(offset int64, whence int) (ret int64, err error) {
+func (f *LogFile) Seek(offset int64, whence int) (ret int64, err error) {
 	ret, err = f.File.Seek(offset, whence)
 	if err != nil {
 		return
@@ -35,10 +38,10 @@ func (f *logFile) Seek(offset int64, whence int) (ret int64, err error) {
 }
 
 // AlignToRow seeks for new line beginning with timestamp. It ignores io.EOF errors
-func (f *logFile) AlignToRow() (ret int64, err error) {
+func (f *LogFile) AlignToRow() (ret int64, err error) {
 	var n, ri int
 	for {
-		buf := make([]byte, bufSize)
+		buf := make([]byte, f.bufSize)
 		if n, err = f.File.Read(buf); errors.Is(err, io.EOF) {
 			time.Sleep(time.Second)
 			continue
@@ -46,19 +49,19 @@ func (f *logFile) AlignToRow() (ret int64, err error) {
 			return ret, fmt.Errorf("error align to next row: %w", err)
 		}
 		for {
-			rowPrefix := []byte("\n" + time.Now().Format(logTimeFormat[:16]))
+			rowPrefix := []byte("\n" + time.Now().Format(f.logTsFmt[:f.secRndPos]))
 			var i int
 			if i = bytes.Index(buf, rowPrefix); i == -1 {
 				break
-			} else if ri = i + 1; n-ri < len(logTimeFormat) {
+			} else if ri = i + 1; n-ri < len(f.logTsFmt) {
 				_, err = f.File.Seek(int64(i-n), io.SeekCurrent)
 				if err != nil {
 					return
 				}
 				break
 			} else if _, err := time.Parse(
-				logTimeFormat,
-				string(buf[ri:ri+len(logTimeFormat)])); err != nil {
+				f.logTsFmt,
+				string(buf[ri:ri+len(f.logTsFmt)])); err != nil {
 				continue
 			}
 			return f.File.Seek(int64(ri-n), io.SeekCurrent)
@@ -67,7 +70,7 @@ func (f *logFile) AlignToRow() (ret int64, err error) {
 }
 
 // Read implements io.Reader interface. It ignores io.EOF until ModifyClose event.
-func (f *logFile) Read(buf []byte) (n int, err error) {
+func (f *LogFile) Read(buf []byte) (n int, err error) {
 	if f.blockChan == nil {
 		f.blockChan = make(chan []byte, f.cacheSize)
 		go f.readAhead()
@@ -93,7 +96,7 @@ func (f *logFile) Read(buf []byte) (n int, err error) {
 }
 
 // readAhead is used to buffer ahead and reduce read operations with storage access
-func (f *logFile) readAhead() {
+func (f *LogFile) readAhead() {
 	defer close(f.blockChan)
 	if err := f.watcher.AddWatch(f.File.Name(), inotify.InModify|inotify.InCloseWrite); err != nil {
 		f.err = err
@@ -109,7 +112,7 @@ func (f *logFile) readAhead() {
 		select {
 		case event := <-f.watcher.Event:
 			for {
-				buf := make([]byte, bufSize)
+				buf := make([]byte, f.bufSize)
 				num, err := f.File.Read(buf)
 				if errors.Is(err, io.EOF) {
 					if event.Mask&inotify.InCloseWrite != 0 {
@@ -133,13 +136,13 @@ func (f *logFile) readAhead() {
 }
 
 // Close implements io.Reader interface
-func (f *logFile) Close() {
+func (f *LogFile) Close() {
 	f.watcher.Close()
 	f.File.Close()
 }
 
 // OpenLogFile creates new instance of logFile
-func OpenLogFile(name string, cacheSize int) (f *logFile, err error) {
+func OpenLogFile(name, logTsFmt string, secRndPos, bufSize, cacheSize int) (f *LogFile, err error) {
 	var file *os.File
 	var w *inotify.Watcher
 	file, err = os.Open(name)
@@ -151,9 +154,12 @@ func OpenLogFile(name string, cacheSize int) (f *logFile, err error) {
 		file.Close()
 		return nil, err
 	}
-	log_file := &logFile{
+	log_file := &LogFile{
 		File:      file,
+		secRndPos: secRndPos,
+		bufSize:   bufSize,
 		cacheSize: cacheSize,
+		logTsFmt:  logTsFmt,
 		tailBuf:   make([]byte, 0, bufSize),
 		watcher:   w,
 	}
