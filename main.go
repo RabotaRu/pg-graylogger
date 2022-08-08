@@ -65,11 +65,9 @@ var (
 		"leader_pid",
 		"query_id",
 	}
-	reMsg = regexp.MustCompile("(?is)" +
-		`^(?:duration:\s(?P<duration>\d+\.\d{3})\sms\s*|)` +
-		`(?:(?:statement|execute .+?):\s*(?P<statement>.*?)\s*|)$`)
+	reMsg = regexp.MustCompile(`(?is)^(?:duration:\s(?P<duration>\d+\.\d{3})\sms\s*|)(?:(?:statement|execute .+?):\s*(?P<statement>.*?)\s*|)$`)
 	reValues = regexp.MustCompile(`(?si)\s+(VALUES|IN|\)\s*=)\s*\(`)
-	reSubReq = regexp.MustCompile(`(?si)^\s*(INSERT|SELECT|UPDATE)\s+`)
+	reSubReq = regexp.MustCompile(`(?si)^\s*(INSERT|SELECT|UPDATE|\SSELECT)\s+`)
 )
 
 func CleanQuery(q *string) {
@@ -84,6 +82,7 @@ func CleanQuery(q *string) {
 			break
 		}
 		if i := reSubReq.FindStringIndex(query[pos:]); i != nil {
+		    depsql += query[ppos:pos]
 			ppos = pos + i[1]
 			continue
 		}
