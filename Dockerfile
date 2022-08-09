@@ -14,7 +14,7 @@ RUN go mod download
 # Copy src code from the host and compile it
 COPY cmd cmd
 COPY pkg pkg
-RUN go build -a -o /${PROJECT} ./cmd/${PROJECT}
+RUN go build -a -o /${PROJECT} ./main.go
 
 ### Base image with shell
 FROM alpine:${ALPINE_VERSION} as base-release
