@@ -5,8 +5,9 @@ Additionally, it supports depersonalization (removing exact values from statemen
 extracting duration of statement as separate field, binding it to previous statement in a session. 
 
 ## Preparation
-First of all, you need to enable logging in CSV format in Postgresql.
+First you need to enable logging in CSV format in Postgresql.
 To do that, open `/etc/postgresql/14/main/postgresql.conf` and add or change lines
+
 ```
 log_destination = "csvlog"
 loggin_collector = on

@@ -14,8 +14,6 @@ builds:
     ldflags:
       - -s -w -X github.com/RabotaRu/pg-graylogger.Version={{ .Version }}
 
-archives:
-
 checksum:
   name_template: "checksums.txt"
 
@@ -57,7 +55,7 @@ changelog:
       - typo
 
 dockers:
-  - dockerfile: Dockerfile.goreleaser
+  - dockerfile: Dockerfile
     image_templates:
       - "ghcr.io/rabotaru/pg-graylogger:{{ .Version }}"
       - "ghcr.io/rabotaru/pg-graylogger:latest"
@@ -69,8 +67,18 @@ dockers:
       - "--label=org.opencontainers.image.version={{ .Version }}"
       - "--label=org.opencontainers.image.licenses=MIT"
       - "--label=org.opencontainers.image.source=https://github.com/rabotaru/pg-graylogger"
-      - "--label=org.opencontainers.image.url=https://github.com/rabotaru/pg-graylogger/pkgs/container/pg-graylogger"
       - "--platform=linux/amd64"
+      - "--target=goreleaser"
+      - "--pull"
 
     goos: linux
     goarch: amd64
+    use: buildx
+
+nfpms:
+- homepage: https://github.com/rabotaru/pg-graylogger
+  maintainer: TBD
+  formats:
+  - apk
+  - deb
+  - rpm

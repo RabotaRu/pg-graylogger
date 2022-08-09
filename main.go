@@ -65,7 +65,7 @@ var (
 		"leader_pid",
 		"query_id",
 	}
-	reMsg = regexp.MustCompile(`(?is)^(?:duration:\s(?P<duration>\d+\.\d{3})\sms\s*|)(?:(?:statement|execute .+?):\s*(?P<statement>.*?)\s*|)$`)
+	reMsg    = regexp.MustCompile(`(?is)^(?:duration:\s(?P<duration>\d+\.\d{3})\sms\s*|)(?:(?:statement|execute .+?):\s*(?P<statement>.*?)\s*|)$`)
 	reValues = regexp.MustCompile(`(?si)\s+(VALUES|IN|\)\s*=)\s*\(`)
 	reSubReq = regexp.MustCompile(`(?si)^\s*(INSERT|SELECT|UPDATE|\SSELECT)\s+`)
 )
@@ -82,13 +82,13 @@ func CleanQuery(q *string) {
 			break
 		}
 		if i := reSubReq.FindStringIndex(query[pos:]); i != nil {
-		    depsql += query[ppos:pos]
+			depsql += query[ppos:pos]
 			ppos = pos + i[1]
 			continue
 		}
-		var inum, closed_brackets, temp_pos int
+		var inum, closedBrackets, tempPos int
 		var subtext bool
-		opened_brackets := 1
+		openedBrackets := 1
 		depsql += query[ppos:pos]
 	findBlock:
 		for i, c := range query[pos:] {
@@ -102,29 +102,29 @@ func CleanQuery(q *string) {
 				inum++
 			case ' ', '\t', '\f', '\n', '\r':
 			case '(':
-				opened_brackets++
+				openedBrackets++
 			case ')':
-				if closed_brackets == opened_brackets {
+				if closedBrackets == openedBrackets {
 					break findBlock
 				}
-				closed_brackets++
-				if closed_brackets == opened_brackets {
+				closedBrackets++
+				if closedBrackets == openedBrackets {
 					inum++
-					temp_pos = pos + i
+					tempPos = pos + i
 				}
 			default:
-				if closed_brackets == opened_brackets {
+				if closedBrackets == openedBrackets {
 					break findBlock
 				}
 			}
 		}
-		if temp_pos != 0 {
-			if closed_brackets > 0 {
-				depsql += fmt.Sprintf("/* HIDDEN %v VALUES %v symbols */", closed_brackets, temp_pos-ppos)
+		if tempPos != 0 {
+			if closedBrackets > 0 {
+				depsql += fmt.Sprintf("/* HIDDEN %v VALUES %v symbols */", closedBrackets, tempPos-ppos)
 			} else {
-				depsql += fmt.Sprintf("/* HIDDEN %v ITEMS %v symbols */", inum, temp_pos-ppos)
+				depsql += fmt.Sprintf("/* HIDDEN %v ITEMS %v symbols */", inum, tempPos-ppos)
 			}
-			ppos = temp_pos
+			ppos = tempPos
 		}
 	}
 	depsql += query[ppos:]

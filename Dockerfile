@@ -1,4 +1,4 @@
-ARG GOLANG_VERSION=1.16
+ARG GOLANG_VERSION=1.18
 ARG ALPINE_VERSION=3.15
 
 FROM golang:${GOLANG_VERSION}-alpine${ALPINE_VERSION} AS builder
@@ -13,7 +13,7 @@ RUN go mod download
 
 # Copy src code from the host and compile it
 COPY . .
-RUN go build -a -o /${PROJECT} ./main.go
+RUN go build -a -o /${PROJECT} .
 
 ### Base image with shell
 FROM alpine:${ALPINE_VERSION} as base-release
