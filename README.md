@@ -1,12 +1,12 @@
-# pg_graylogger
+# pg-graylogger
 
-Service for exporting postgresql csvlog to graylog server.
-Additionaly it supports depersonalization (removing exact values from statements) and
+Service for exporting postgresql `csvlog` to graylog server.
+Additionally, it supports depersonalization (removing exact values from statements) and
 extracting duration of statement as separate field, binding it to previous statement in a session. 
 
 ## Preparation
 First of all, you need to enable logging in CSV format in Postgresql.
-To do that, open `/etc/postgresql/14/main/postgresql.conf`and add or change lines
+To do that, open `/etc/postgresql/14/main/postgresql.conf` and add or change lines
 ```
 log_destination = "csvlog"
 loggin_collector = on
@@ -15,14 +15,16 @@ loggin_collector = on
 ## Installation
 
 ### Deploy with Docker
-You only need to bind mount directory where postgresql write logs in CSV format from host
-to `/var/log/postgresql` inside container and set `-graylog-address` so it knows where to send logs.
-```
+
+You just need to bind mount directory where postgresql write logs with CSV format from host to `/var/log/postgresql` inside container and set `-graylog-address` so it knows where to send logs.
+
+```bash
 docker run -v "/var/log/postgresql:/var/log/postgresql" pg_graylogger:latest -graylog-address graylog.local:2345 -depers -facility develop
 ```
 
 ## Usage
-```
+
+```console
 Usage of ./pg_graylogger:
   -cache-size int
     	ReadAhead buffer cache size (default 10)
