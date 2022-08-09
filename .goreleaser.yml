@@ -57,7 +57,7 @@ changelog:
       - typo
 
 dockers:
-  - dockerfile: Dockerfile
+  - dockerfile: Dockerfile.goreleaser
     image_templates:
       - "ghcr.io/rabotaru/pg-graylogger:{{ .Version }}"
       - "ghcr.io/rabotaru/pg-graylogger:latest"
@@ -70,9 +70,7 @@ dockers:
       - "--label=org.opencontainers.image.licenses=MIT"
       - "--label=org.opencontainers.image.source=https://github.com/rabotaru/pg-graylogger"
       - "--label=org.opencontainers.image.url=https://github.com/rabotaru/pg-graylogger/pkgs/container/pg-graylogger"
-
       - "--platform=linux/amd64"
-      - "--target=goreleaser"
-      - "--pull"
+
     goos: linux
     goarch: amd64
