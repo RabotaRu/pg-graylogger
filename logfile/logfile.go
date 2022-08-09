@@ -12,7 +12,7 @@ import (
 	"k8s.io/utils/inotify"
 )
 
-// logFile is blocking and ahead read caching io.Reader interface implementation
+// LogFile is blocking and ahead read caching io.Reader interface implementation
 type LogFile struct {
 	*os.File
 	watcher   *inotify.Watcher
