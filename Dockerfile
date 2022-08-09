@@ -12,8 +12,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 # Copy src code from the host and compile it
-COPY cmd cmd
-COPY pkg pkg
+COPY . .
 RUN go build -a -o /${PROJECT} ./main.go
 
 ### Base image with shell
