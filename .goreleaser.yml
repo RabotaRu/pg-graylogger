@@ -12,6 +12,7 @@ builds:
     ignore:
       - goos: darwin
         goarch: "386"
+      - goos: windows
     ldflags:
       - -s -w -X github.com/RabotaRu/pg-graylogger.Version={{ .Version }}
 
