@@ -8,7 +8,6 @@ builds:
       - GO386=softfloat
     goos:
       - linux
-      - windows
       - darwin
     ignore:
       - goos: darwin
@@ -17,9 +16,6 @@ builds:
       - -s -w -X github.com/RabotaRu/pg-graylogger.Version={{ .Version }}
 
 archives:
-  - format_overrides:
-      - goos: windows
-        format: zip
 
 checksum:
   name_template: "checksums.txt"
