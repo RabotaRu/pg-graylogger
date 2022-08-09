@@ -8,11 +8,9 @@ builds:
       - GO386=softfloat
     goos:
       - linux
-      - darwin
     ignore:
-      - goos: darwin
-        goarch: "386"
       - goos: windows
+      - goos: darwin
     ldflags:
       - -s -w -X github.com/RabotaRu/pg-graylogger.Version={{ .Version }}
 
