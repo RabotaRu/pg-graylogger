@@ -47,3 +47,4 @@ Usage of ./pg_graylogger:
   -version
     	Show version
 ```
+
