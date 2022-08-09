@@ -1,24 +1,44 @@
-ARG GOLANG_VERSION=1.17
-ARG VERSION=0.9.2
+ARG GOLANG_VERSION=1.18
+ARG ALPINE_VERSION=3.16
 
-FROM golang:${GOLANG_VERSION} AS builder
-ARG VERSION
-# enable Go modules support
+FROM golang:${GOLANG_VERSION}-alpine${ALPINE_VERSION} AS builder
 ENV GO111MODULE=on
 ENV CGO_ENABLED=0
+ENV PROJECT=pg-graylogger
 
-WORKDIR pg_graylogger
+WORKDIR ${PROJECT}
+
+COPY go.mod go.sum ./
+RUN go mod download
 
 # Copy src code from the host and compile it
-COPY go.* *.go ./
-COPY logfile/ ./logfile/
-RUN set -ex && \
-    ls -l && \
-    go mod tidy && \
-    go build -a -trimpath -ldflags "-X main.Version=$VERSION -w" -o /pg_graylogger
+COPY cmd cmd
+COPY pkg pkg
+RUN go build -a -o /${PROJECT} ./cmd/${PROJECT}
 
-###
-FROM scratch
-LABEL maintainer="o.marin@rabota.ru"
-COPY --from=builder /pg_graylogger /bin/
-ENTRYPOINT ["/bin/pg_graylogger"]
+### Base image with shell
+FROM alpine:${ALPINE_VERSION} as base-release
+RUN apk --update --no-cache add ca-certificates && update-ca-certificates
+ENTRYPOINT ["/bin/pg-graylogger"]
+
+### Build with goreleaser
+FROM base-release as goreleaser
+COPY pg-graylogger /bin/
+
+### Build in docker
+FROM base-release as release
+COPY --from=builder /pg-graylogger /bin/
+
+### Scratch with build in docker
+FROM scratch as scratch-release
+COPY --from=base-release /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=builder /pg-graylogger /bin/
+ENTRYPOINT ["/bin/pg-graylogger"]
+USER 65534
+
+### Scratch with goreleaser
+FROM scratch as scratch-goreleaser
+COPY --from=base-release /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY pg-graylogger /bin/
+ENTRYPOINT ["/bin/pg-graylogger"]
+USER 65534
