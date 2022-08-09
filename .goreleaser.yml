@@ -68,7 +68,6 @@ dockers:
       - "ghcr.io/rabotaru/pg-graylogger:latest"
 
     build_flag_templates:
-      - "--pull"
       - "--label=org.opencontainers.image.created={{ .Date }}"
       - "--label=org.opencontainers.image.title={{ .ProjectName }}"
       - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
@@ -76,6 +75,9 @@ dockers:
       - "--label=org.opencontainers.image.licenses=MIT"
       - "--label=org.opencontainers.image.source=https://github.com/rabotaru/pg-graylogger"
       - "--label=org.opencontainers.image.url=https://github.com/rabotaru/pg-graylogger/pkgs/container/pg-graylogger"
+
       - "--platform=linux/amd64"
+      - "--target=goreleaser"
+      - "--pull"
     goos: linux
     goarch: amd64
